@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -35,17 +37,22 @@ fn dot_mask(cx: usize, cy: usize) -> u8 {
 
 // ─── Coastline color ────────────────────────────────────────────────
 
-const COASTLINE: Color = Color::Rgb(30, 55, 85);
+const COASTLINE: Color = Color::Rgb(50, 80, 120);
+const GRID_COLOR: Color = Color::Rgb(15, 20, 35);
 
 // ─── BrailleCanvas ──────────────────────────────────────────────────
 
 /// A 2D canvas where each terminal character cell holds a 2x4 braille dot
 /// matrix (Unicode Braille U+2800..U+28FF).
+///
+/// Each cell tracks a priority value so that higher-priority draws (dots,
+/// glows) overwrite lower-priority ones (grid lines, coastlines).
 pub struct BrailleCanvas {
     width: usize,
     height: usize,
     cells: Vec<Vec<u8>>,
     colors: Vec<Vec<Color>>,
+    priority: Vec<Vec<u8>>,
 }
 
 impl BrailleCanvas {
@@ -56,6 +63,7 @@ impl BrailleCanvas {
             height,
             cells: vec![vec![0u8; width]; height],
             colors: vec![vec![COASTLINE; width]; height],
+            priority: vec![vec![0u8; width]; height],
         }
     }
 
@@ -72,6 +80,12 @@ impl BrailleCanvas {
     /// Set a single braille dot at pixel coordinates `(px, py)`.
     /// `px` range: `0..width*2`, `py` range: `0..height*4`.
     pub fn set_dot(&mut self, px: i32, py: i32, color: Color) {
+        self.set_dot_pri(px, py, color, 1);
+    }
+
+    /// Set a braille dot with a priority level. Higher priority overwrites
+    /// lower priority colors in the same cell.
+    pub fn set_dot_pri(&mut self, px: i32, py: i32, color: Color, pri: u8) {
         if px < 0 || py < 0 {
             return;
         }
@@ -85,11 +99,27 @@ impl BrailleCanvas {
         let cx = px % 2;
         let cy = py % 4;
         self.cells[row][col] |= dot_mask(cx, cy);
-        self.colors[row][col] = color;
+        if pri >= self.priority[row][col] {
+            self.colors[row][col] = color;
+            self.priority[row][col] = pri;
+        }
     }
 
     /// Draw a line using Bresenham's algorithm in braille pixel space.
     pub fn draw_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color) {
+        self.draw_line_pri(x0, y0, x1, y1, color, 1);
+    }
+
+    /// Draw a line with a priority level.
+    pub fn draw_line_pri(
+        &mut self,
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+        color: Color,
+        pri: u8,
+    ) {
         let mut x0 = x0;
         let mut y0 = y0;
         let dx = (x1 - x0).abs();
@@ -99,7 +129,7 @@ impl BrailleCanvas {
         let mut err = dx + dy;
 
         loop {
-            self.set_dot(x0, y0, color);
+            self.set_dot_pri(x0, y0, color, pri);
             if x0 == x1 && y0 == y1 {
                 break;
             }
@@ -117,11 +147,23 @@ impl BrailleCanvas {
 
     /// Draw a filled circle at braille pixel coordinates.
     pub fn draw_filled_circle(&mut self, cx: i32, cy: i32, radius: i32, color: Color) {
+        self.draw_filled_circle_pri(cx, cy, radius, color, 2);
+    }
+
+    /// Draw a filled circle with a priority level.
+    pub fn draw_filled_circle_pri(
+        &mut self,
+        cx: i32,
+        cy: i32,
+        radius: i32,
+        color: Color,
+        pri: u8,
+    ) {
         let r2 = radius * radius;
         for dy in -radius..=radius {
             for dx in -radius..=radius {
                 if dx * dx + dy * dy <= r2 {
-                    self.set_dot(cx + dx, cy + dy, color);
+                    self.set_dot_pri(cx + dx, cy + dy, color, pri);
                 }
             }
         }
@@ -259,309 +301,17 @@ pub fn country_center(iso2: &str) -> Option<(f64, f64)> {
 
 // ─── Coastline Data ─────────────────────────────────────────────────
 
-/// Return hardcoded world coastlines as polylines of (lon, lat) pairs.
-/// Simplified to ~310 points for a recognizable world outline.
-fn world_coastlines() -> Vec<Vec<(f64, f64)>> {
-    vec![
-        // ── North America: Pacific coast ────────────────────────
-        vec![
-            // Alaska
-            (-168.0, 65.0), (-162.0, 63.5), (-153.0, 60.0), (-149.0, 61.0),
-            (-140.0, 60.0),
-            // Western Canada / US Pacific coast
-            (-137.0, 59.0), (-135.0, 57.0), (-130.0, 54.0), (-126.0, 49.0),
-            (-124.0, 46.0), (-124.0, 42.0), (-120.0, 35.0), (-117.0, 32.5),
-            // Baja & Mexico Pacific
-            (-115.0, 30.0), (-112.0, 26.0), (-106.0, 23.0), (-105.0, 20.0),
-            // Central America
-            (-97.0, 16.0), (-92.0, 15.0), (-88.0, 14.0), (-83.0, 10.0),
-            (-80.0, 8.0), (-77.0, 8.5),
-            // Colombia / Venezuela coast
-            (-75.0, 10.0), (-72.0, 12.0), (-68.0, 12.0), (-66.0, 11.0),
-            (-62.0, 10.5),
-            // Caribbean coast
-            (-61.0, 10.0), (-60.0, 11.0),
-        ],
-        // ── North America: Gulf of Mexico ───────────────────────
-        vec![
-            (-81.0, 25.0), (-82.0, 27.0), (-84.0, 30.0), (-88.0, 30.0),
-            (-90.0, 29.0), (-94.0, 29.5), (-97.0, 26.0),
-        ],
-        // ── North America: East coast & Arctic ──────────────────
-        vec![
-            // US East Coast
-            (-80.0, 25.0), (-80.0, 27.0), (-81.0, 31.0), (-78.0, 34.0),
-            (-76.0, 36.0), (-75.0, 38.0), (-74.0, 40.0), (-72.0, 41.0),
-            (-70.0, 42.0), (-67.0, 45.0), (-66.0, 44.5),
-            // Maritime Canada
-            (-64.0, 46.0), (-61.0, 46.0), (-60.0, 47.0), (-59.0, 47.5),
-            (-56.0, 47.5), (-53.0, 47.0), (-52.5, 47.5),
-            // Newfoundland / Labrador
-            (-55.0, 50.0), (-57.0, 52.0), (-59.0, 54.0), (-62.0, 56.0),
-            (-64.0, 58.0), (-64.0, 60.0), (-68.0, 62.0),
-            // Hudson Bay / Arctic coast
-            (-72.0, 63.0), (-78.0, 63.0), (-82.0, 62.0), (-85.0, 60.0),
-            (-88.0, 58.0), (-90.0, 57.0), (-95.0, 57.0), (-96.0, 60.0),
-            (-94.0, 63.0), (-88.0, 67.0), (-85.0, 69.0), (-80.0, 70.0),
-            (-75.0, 72.0), (-70.0, 73.0), (-65.0, 73.0),
-        ],
-        // ── South America ───────────────────────────────────────
-        vec![
-            // Colombia coast → Brazil → Argentina → Chile → back
-            (-77.0, 8.5), (-75.0, 6.0), (-73.0, 4.0), (-70.0, 2.0),
-            (-65.0, 1.0), (-60.0, 2.0), (-52.0, 4.0), (-50.0, 2.0),
-            (-48.0, -1.0), (-44.0, -2.5), (-40.0, -4.0), (-38.0, -5.0),
-            (-35.0, -7.0), (-35.0, -10.0), (-37.0, -12.0), (-39.0, -15.0),
-            (-40.0, -20.0), (-41.0, -22.0), (-44.0, -23.0), (-47.0, -25.0),
-            (-48.0, -28.0),
-            // Uruguay / Argentina
-            (-50.0, -30.0), (-52.0, -33.0), (-55.0, -34.5), (-57.0, -35.0),
-            (-58.5, -36.0), (-59.0, -38.0), (-62.0, -39.0), (-63.0, -41.0),
-            (-65.0, -43.0), (-66.0, -45.0), (-67.0, -47.0), (-66.0, -49.0),
-            (-68.0, -51.0), (-69.0, -53.0), (-70.0, -54.0),
-            // Tierra del Fuego → Chile Pacific coast
-            (-72.0, -53.0), (-73.0, -50.0), (-75.0, -47.0), (-74.0, -44.0),
-            (-73.0, -40.0), (-72.0, -37.0), (-71.0, -33.0), (-72.0, -30.0),
-            (-71.0, -27.0), (-70.0, -23.0), (-70.0, -18.0), (-71.0, -15.0),
-            (-75.0, -12.0), (-77.0, -10.0), (-80.0, -5.0), (-81.0, -2.0),
-            (-80.0, 0.0), (-78.0, 2.0), (-77.0, 4.0), (-77.0, 8.5),
-        ],
-        // ── Europe: Scandinavia & Baltic ────────────────────────
-        vec![
-            // Northern Norway → west coast → Denmark → Sweden → Finland
-            (28.0, 71.0), (25.0, 71.0), (20.0, 70.0), (16.0, 69.0),
-            (14.0, 68.0), (12.0, 66.0), (10.0, 63.0), (8.0, 61.0),
-            (5.0, 60.0), (5.0, 58.0), (7.0, 57.5),
-            // Denmark / Jutland
-            (8.0, 57.0), (10.0, 57.5), (10.0, 56.0), (12.0, 56.0),
-            (12.0, 58.0), (14.0, 58.0),
-            // Sweden east coast → Finland
-            (16.0, 57.0), (18.0, 59.0), (18.0, 60.0), (20.0, 60.0),
-            (22.0, 60.0), (24.0, 60.0), (25.0, 61.0), (26.0, 64.0),
-            (28.0, 66.0), (29.0, 68.0), (28.0, 71.0),
-        ],
-        // ── Europe: Western & Mediterranean ─────────────────────
-        vec![
-            // Netherlands → France → Iberia → Mediterranean
-            (5.0, 53.0), (4.0, 52.0), (3.5, 51.5), (2.0, 51.0),
-            (1.0, 50.5), (-1.0, 49.0), (-3.0, 48.5), (-5.0, 48.5),
-            (-4.0, 47.5), (-2.0, 47.0), (-1.0, 46.5), (-2.0, 44.0),
-            (-1.5, 43.5),
-            // Spain
-            (-2.0, 43.5), (-5.0, 43.5), (-8.0, 43.5), (-9.5, 42.0),
-            (-9.0, 39.0), (-7.5, 37.0), (-6.0, 36.5),
-            // Strait of Gibraltar → Med Spain
-            (-5.5, 36.0), (-4.0, 36.5), (-2.0, 37.0), (0.0, 38.0),
-            (1.0, 39.0), (2.0, 41.5), (3.0, 43.0),
-            // French Riviera → Italy
-            (5.0, 43.5), (7.5, 44.0), (9.0, 44.0), (10.0, 44.0),
-            // Italy boot
-            (12.0, 44.0), (13.5, 43.5), (14.0, 42.0), (15.5, 41.0),
-            (16.0, 40.0), (16.0, 39.0), (15.5, 38.0), (16.0, 37.5),
-            // Sicily tip
-            (15.0, 37.0), (13.0, 37.0), (12.5, 38.0),
-        ],
-        // ── Europe: Balkans / Eastern Mediterranean ─────────────
-        vec![
-            (14.0, 45.5), (16.0, 45.0), (18.0, 43.0), (19.0, 42.0),
-            (20.0, 40.0), (20.0, 39.0), (23.0, 38.0), (24.0, 37.0),
-            (26.0, 38.0), (28.0, 37.0), (26.0, 40.0), (29.0, 41.0),
-        ],
-        // ── Europe: Black Sea coast ─────────────────────────────
-        vec![
-            (29.0, 41.0), (31.0, 42.0), (33.0, 42.0), (36.0, 42.5),
-            (38.0, 42.0), (40.0, 43.0), (41.0, 42.0), (40.0, 41.0),
-            (37.0, 41.5), (36.0, 41.5), (34.0, 42.0), (33.0, 44.0),
-            (31.0, 46.0), (30.0, 46.5),
-        ],
-        // ── Africa: West coast ──────────────────────────────────
-        vec![
-            // Morocco → around the continent
-            (-6.0, 35.5), (-6.0, 34.0), (-8.0, 32.0), (-10.0, 30.0),
-            (-13.0, 27.5), (-16.0, 24.0), (-17.0, 21.0), (-16.0, 18.0),
-            (-16.0, 15.0), (-17.0, 13.0), (-15.0, 11.0), (-13.0, 9.0),
-            (-11.0, 7.0), (-8.0, 5.0), (-5.0, 5.0), (-3.0, 5.0),
-            (1.0, 6.0), (3.0, 6.5), (5.0, 4.5), (7.0, 4.5),
-            (9.0, 4.0), (10.0, 2.0), (9.5, 1.0), (9.0, 4.0),
-            (10.0, 6.0), (12.0, 4.0), (14.0, 3.0), (16.0, 2.0),
-            // Central / East Africa coast
-            (18.0, -3.0), (20.0, -5.0), (25.0, -8.0), (30.0, -10.0),
-            (33.0, -12.0), (35.0, -14.0), (37.0, -16.0), (40.0, -18.0),
-            (41.0, -20.0),
-            // Southeast Africa
-            (36.0, -22.0), (35.0, -24.0), (33.0, -26.0), (32.0, -28.0),
-            (30.0, -30.0), (28.0, -32.0), (27.0, -33.5),
-            // South Africa → West coast return
-            (25.0, -34.0), (22.0, -34.5), (19.0, -34.5), (18.0, -33.5),
-            (17.0, -32.0), (16.0, -29.0), (15.0, -27.0), (13.0, -23.0),
-            (12.0, -18.0), (12.0, -13.0), (11.0, -8.0), (12.0, -5.0),
-            (10.0, -2.0), (9.5, 1.0),
-        ],
-        // ── Africa: East coast / Horn ───────────────────────────
-        vec![
-            // Red Sea → Horn of Africa → down to Mozambique
-            (33.0, 30.0), (34.0, 28.0), (35.0, 25.0), (36.0, 22.0),
-            (38.0, 18.0), (40.0, 15.0), (42.0, 13.0), (44.0, 11.0),
-            (47.0, 9.0), (49.0, 8.0), (51.0, 11.0), (50.0, 5.0),
-            (48.0, 2.0), (44.0, -1.0), (42.0, -2.0), (41.0, -5.0),
-            (40.0, -10.0), (40.0, -15.0),
-        ],
-        // ── Asia: Turkey → Levant → Arabia ──────────────────────
-        vec![
-            (29.0, 41.0), (32.0, 40.0), (35.0, 39.0), (36.0, 37.0),
-            (36.0, 35.0), (35.0, 33.0), (35.0, 31.0),
-            // Sinai / Arabia west
-            (34.0, 29.0), (33.0, 28.0), (34.0, 26.0), (38.0, 22.0),
-            (42.0, 17.0), (43.0, 15.0), (44.0, 13.5),
-        ],
-        // ── Asia: Arabian Peninsula east → Iran → India ─────────
-        vec![
-            (44.0, 13.5), (46.0, 13.0), (48.0, 14.0), (52.0, 17.0),
-            (55.0, 20.0), (56.0, 22.0), (56.5, 24.0), (56.0, 26.0),
-            (51.0, 27.0), (50.0, 29.0), (48.0, 30.0), (48.0, 31.0),
-            (50.0, 30.0), (52.0, 28.0), (54.0, 26.5), (57.0, 25.0),
-            // Iran / Pakistan coast
-            (58.0, 25.5), (60.0, 25.0), (62.0, 25.0), (65.0, 25.5),
-            (67.0, 24.5), (68.0, 23.0),
-            // India west coast
-            (70.0, 22.0), (72.0, 20.0), (73.0, 17.0), (74.0, 14.0),
-            (74.5, 12.0), (76.0, 10.0), (77.0, 8.0),
-            // Sri Lanka tip → India east coast → Bangladesh
-            (78.0, 8.5), (80.0, 7.0), (80.0, 9.0), (80.0, 12.0),
-            (81.0, 14.0), (82.0, 16.0), (83.0, 18.0), (85.0, 20.0),
-            (87.0, 22.0), (89.0, 22.0), (90.0, 22.0), (92.0, 21.0),
-        ],
-        // ── Asia: Southeast Asia mainland ───────────────────────
-        vec![
-            // Myanmar → Thailand → Malay Peninsula
-            (92.0, 21.0), (95.0, 18.0), (97.0, 16.0), (98.0, 13.0),
-            (99.0, 10.0), (100.0, 7.0), (101.0, 4.0), (103.0, 1.5),
-            (104.0, 1.3),
-        ],
-        // ── Asia: Vietnam / China coast ─────────────────────────
-        vec![
-            (103.0, 10.0), (106.0, 11.0), (108.0, 12.0), (109.0, 14.0),
-            (108.0, 16.0), (107.0, 18.0), (107.0, 20.0), (108.0, 21.5),
-            (110.0, 21.0), (111.0, 20.0),
-            // China coast north
-            (113.0, 22.0), (114.0, 23.0), (117.0, 24.0), (118.0, 25.0),
-            (120.0, 26.0), (121.0, 28.0), (122.0, 30.0), (121.0, 31.0),
-            (122.0, 33.0), (120.0, 35.0), (119.0, 36.0), (121.0, 37.0),
-            (122.0, 38.0), (121.0, 39.0), (118.0, 40.0),
-            // NE China → Korea
-            (120.0, 41.0), (122.0, 40.0), (124.0, 40.0), (126.0, 38.0),
-            (127.0, 36.0), (127.0, 34.0), (129.0, 35.0), (130.0, 36.0),
-        ],
-        // ── Asia: Russian Far East ──────────────────────────────
-        vec![
-            (131.0, 43.0), (133.0, 43.5), (135.0, 45.0), (137.0, 47.0),
-            (139.0, 48.0), (141.0, 47.0), (142.0, 50.0), (143.0, 52.0),
-            (144.0, 55.0), (145.0, 58.0), (150.0, 59.0), (155.0, 58.0),
-            (160.0, 60.0), (163.0, 62.0), (168.0, 64.0), (170.0, 65.0),
-            (172.0, 65.0),
-        ],
-        // ── Japan ───────────────────────────────────────────────
-        vec![
-            // Kyushu → Honshu → Hokkaido
-            (130.0, 32.0), (131.0, 33.0), (132.0, 34.0), (134.0, 34.0),
-            (135.0, 35.0), (137.0, 35.0), (138.0, 35.5), (140.0, 36.0),
-            (141.0, 38.0), (141.0, 40.0), (140.0, 41.0), (141.0, 42.0),
-            (143.0, 43.0), (145.0, 44.0), (145.0, 45.0),
-        ],
-        // ── Australia ───────────────────────────────────────────
-        vec![
-            // Clockwise from NW
-            (114.0, -22.0), (118.0, -20.0), (121.0, -18.0), (127.0, -14.0),
-            (131.0, -12.0), (136.0, -12.0), (137.0, -14.0), (136.0, -16.0),
-            (141.0, -13.0), (145.0, -15.0), (146.0, -18.0), (149.0, -21.0),
-            (151.0, -24.0), (153.0, -27.0), (153.0, -30.0), (151.0, -33.0),
-            (150.0, -36.0), (147.0, -38.0), (144.0, -38.5),
-            // South coast
-            (142.0, -38.0), (139.0, -37.0), (137.0, -35.5), (136.0, -35.0),
-            (135.0, -35.5), (134.0, -34.0), (131.0, -32.0), (129.0, -32.0),
-            (126.0, -33.0), (122.0, -34.0), (118.0, -34.5), (115.0, -34.0),
-            (114.5, -32.0), (113.5, -28.0), (113.5, -25.0), (114.0, -22.0),
-        ],
-        // ── British Isles ───────────────────────────────────────
-        vec![
-            (-5.0, 50.0), (-5.5, 51.5), (-4.0, 53.0), (-3.0, 54.0),
-            (-5.0, 55.0), (-5.5, 56.0), (-6.0, 57.5), (-5.0, 58.5),
-            (-3.0, 58.5), (-2.0, 57.0), (-1.0, 55.0), (0.0, 53.0),
-            (1.5, 52.0), (1.0, 51.0), (0.0, 51.0), (-1.0, 50.5),
-            (-3.0, 50.5), (-5.0, 50.0),
-        ],
-        // ── Ireland ─────────────────────────────────────────────
-        vec![
-            (-6.5, 52.0), (-8.0, 51.5), (-10.0, 52.0), (-10.0, 53.5),
-            (-9.5, 54.5), (-8.0, 55.0), (-7.0, 55.5), (-6.0, 54.5),
-            (-6.0, 53.0), (-6.5, 52.0),
-        ],
-        // ── Greenland ───────────────────────────────────────────
-        vec![
-            (-50.0, 60.5), (-45.0, 60.0), (-42.0, 62.0), (-40.0, 64.0),
-            (-35.0, 66.0), (-25.0, 70.0), (-20.0, 73.0), (-18.0, 76.0),
-            (-22.0, 77.0), (-30.0, 77.5), (-40.0, 77.0), (-50.0, 76.0),
-            (-55.0, 74.0), (-56.0, 70.0), (-55.0, 67.0), (-52.0, 63.0),
-            (-50.0, 60.5),
-        ],
-        // ── Iceland ─────────────────────────────────────────────
-        vec![
-            (-22.0, 64.0), (-20.0, 63.5), (-16.0, 64.0), (-14.0, 65.0),
-            (-14.0, 66.0), (-18.0, 66.5), (-22.0, 66.0), (-24.0, 65.0),
-            (-22.0, 64.0),
-        ],
-        // ── Borneo ──────────────────────────────────────────────
-        vec![
-            (109.0, 1.0), (110.0, 2.0), (112.0, 2.5), (115.0, 4.5),
-            (117.0, 6.5), (118.0, 5.0), (118.5, 2.0), (117.0, 0.5),
-            (115.0, -1.0), (112.0, -2.0), (110.0, -1.5), (109.0, 1.0),
-        ],
-        // ── Sumatra ─────────────────────────────────────────────
-        vec![
-            (95.0, 5.5), (98.0, 4.0), (101.0, 1.0), (104.0, -1.5),
-            (106.0, -5.0), (105.0, -6.0), (103.0, -4.0), (100.0, -1.0),
-            (97.0, 2.0), (95.0, 5.5),
-        ],
-        // ── Java ────────────────────────────────────────────────
-        vec![
-            (106.0, -6.0), (108.0, -6.5), (110.0, -7.0), (112.0, -7.5),
-            (114.0, -8.0), (114.0, -8.5), (112.0, -8.0), (110.0, -7.5),
-            (108.0, -7.0), (106.0, -6.5),
-        ],
-        // ── New Zealand: North Island ───────────────────────────
-        vec![
-            (173.0, -35.0), (176.0, -37.0), (178.0, -38.5), (177.0, -40.0),
-            (175.0, -41.5), (173.0, -40.0), (174.0, -38.0), (173.0, -35.0),
-        ],
-        // ── New Zealand: South Island ───────────────────────────
-        vec![
-            (170.0, -42.5), (172.0, -42.0), (173.5, -43.0), (172.0, -44.5),
-            (170.0, -45.5), (168.0, -46.5), (167.0, -45.0), (168.0, -43.5),
-            (170.0, -42.5),
-        ],
-        // ── Philippines ─────────────────────────────────────────
-        vec![
-            (119.0, 17.0), (121.0, 18.5), (122.0, 16.0), (124.0, 13.0),
-            (126.0, 10.0), (125.0, 8.0), (123.0, 7.0), (121.0, 10.0),
-            (120.0, 12.0), (119.0, 14.0), (119.0, 17.0),
-        ],
-        // ── Madagascar ──────────────────────────────────────────
-        vec![
-            (49.0, -12.0), (50.0, -15.0), (49.5, -18.0), (48.0, -21.0),
-            (46.0, -24.0), (44.5, -25.0), (44.0, -22.0), (44.5, -18.0),
-            (46.0, -15.0), (48.0, -13.0), (49.0, -12.0),
-        ],
-        // ── Russia: Arctic coast ────────────────────────────────
-        vec![
-            (28.0, 71.0), (33.0, 69.0), (40.0, 68.0), (44.0, 68.0),
-            (50.0, 68.0), (55.0, 68.5), (60.0, 68.0), (65.0, 67.0),
-            (70.0, 68.0), (73.0, 69.0), (77.0, 70.0), (80.0, 70.0),
-            (85.0, 72.0), (90.0, 72.0), (95.0, 72.0), (100.0, 73.0),
-            (105.0, 73.0), (110.0, 73.5), (115.0, 73.0), (120.0, 73.0),
-            (125.0, 73.0), (130.0, 73.5), (135.0, 73.0), (140.0, 72.0),
-            (150.0, 70.0), (160.0, 69.0), (170.0, 66.0), (172.0, 65.0),
-        ],
-    ]
+/// Load world coastlines from the embedded JSON asset file.
+/// Returns polylines of (lon, lat) pairs — ~1800+ points across 70+ polylines.
+fn world_coastlines() -> &'static Vec<Vec<(f64, f64)>> {
+    static COASTLINES: OnceLock<Vec<Vec<(f64, f64)>>> = OnceLock::new();
+    COASTLINES.get_or_init(|| {
+        let data = include_str!("../../assets/world.json");
+        let raw: Vec<Vec<[f64; 2]>> = serde_json::from_str(data).unwrap_or_default();
+        raw.into_iter()
+            .map(|poly| poly.into_iter().map(|p| (p[0], p[1])).collect())
+            .collect()
+    })
 }
 
 // ─── Color Helpers ──────────────────────────────────────────────────
@@ -575,6 +325,51 @@ fn dim_color(c: Color, factor: f64) -> Color {
             (b as f64 * factor) as u8,
         ),
         other => other,
+    }
+}
+
+/// Brighten a color by a factor (1.0 = unchanged, 2.0 = double brightness).
+fn brighten_color(c: Color, factor: f64) -> Color {
+    match c {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            ((r as f64 * factor).min(255.0)) as u8,
+            ((g as f64 * factor).min(255.0)) as u8,
+            ((b as f64 * factor).min(255.0)) as u8,
+        ),
+        other => other,
+    }
+}
+
+// ─── Grid Drawing ───────────────────────────────────────────────────
+
+/// Draw a subtle latitude/longitude grid at 30-degree intervals.
+fn draw_grid(canvas: &mut BrailleCanvas, px_w: usize, px_h: usize) {
+    // Latitude lines every 30 degrees
+    for lat_deg in [-60, -30, 0, 30, 60] {
+        let lat = lat_deg as f64;
+        if lat < LAT_SOUTH || lat > LAT_NORTH {
+            continue;
+        }
+        let (_, py) = project(0.0, lat, px_w, px_h);
+        // Draw dotted horizontal line (every 3rd pixel)
+        let mut x = 0i32;
+        while x < px_w as i32 {
+            canvas.set_dot_pri(x, py, GRID_COLOR, 0);
+            x += 3;
+        }
+    }
+
+    // Longitude lines every 30 degrees
+    for lon_deg in (-180..=180).step_by(30) {
+        let lon = lon_deg as f64;
+        let (px_top, py_top) = project(lon, LAT_NORTH, px_w, px_h);
+        let (_, py_bot) = project(lon, LAT_SOUTH, px_w, px_h);
+        // Draw dotted vertical line (every 3rd pixel)
+        let mut y = py_top;
+        while y < py_bot {
+            canvas.set_dot_pri(px_top, y, GRID_COLOR, 0);
+            y += 3;
+        }
     }
 }
 
@@ -615,9 +410,12 @@ pub fn draw_world_map(
     let px_w = canvas.px_width();
     let px_h = canvas.px_height();
 
+    // ── Draw grid (lowest priority) ─────────────────────────────
+    draw_grid(&mut canvas, px_w, px_h);
+
     // ── Draw coastlines ─────────────────────────────────────────
     let coastlines = world_coastlines();
-    for polyline in &coastlines {
+    for polyline in coastlines.iter() {
         if polyline.len() < 2 {
             continue;
         }
@@ -628,7 +426,7 @@ pub fn draw_world_map(
             let dx = (cur.0 - prev.0).abs() as f64;
             let dy = (cur.1 - prev.1).abs() as f64;
             if dx / (px_w as f64) < 0.4 && dy / (px_h as f64) < 0.4 {
-                canvas.draw_line(prev.0, prev.1, cur.0, cur.1, COASTLINE);
+                canvas.draw_line_pri(prev.0, prev.1, cur.0, cur.1, COASTLINE, 1);
             }
             prev = cur;
         }
@@ -642,19 +440,44 @@ pub fn draw_world_map(
         let cy = py + jy;
         let r = dot.radius as i32;
 
-        // Determine effective radius (pulsing effect)
-        let effective_r = if dot.pulsing && animation_frame % 2 == 0 {
-            r + 1
+        if dot.pulsing {
+            // Pulsing animation: cycle through 4 phases for smooth flash
+            let phase = animation_frame % 4;
+            let (effective_r, core_factor) = match phase {
+                0 => (r + 1, 1.0),   // bright, expanded
+                1 => (r, 0.5),       // dim, normal
+                2 => (r + 1, 0.9),   // bright-ish, expanded
+                _ => (r, 0.35),      // dimmer, normal
+            };
+
+            // Outer glow ring (larger for pulsing dots)
+            let glow_color = dim_color(dot.color, 0.2);
+            canvas.draw_filled_circle_pri(cx, cy, effective_r + 2, glow_color, 2);
+
+            // Middle glow
+            let mid_glow = dim_color(dot.color, 0.45);
+            canvas.draw_filled_circle_pri(cx, cy, effective_r + 1, mid_glow, 3);
+
+            // Core circle (pulsing brightness)
+            let core_color = if core_factor < 1.0 {
+                dim_color(dot.color, core_factor)
+            } else {
+                dot.color
+            };
+            canvas.draw_filled_circle_pri(cx, cy, effective_r, core_color, 4);
         } else {
-            r
-        };
+            // Non-pulsing: static dot with bright glow
+            // Outer glow ring
+            let glow_color = dim_color(dot.color, 0.25);
+            canvas.draw_filled_circle_pri(cx, cy, r + 2, glow_color, 2);
 
-        // Glow ring (outer, dimmed)
-        let glow_color = dim_color(dot.color, 0.35);
-        canvas.draw_filled_circle(cx, cy, effective_r + 1, glow_color);
+            // Inner glow
+            let inner_glow = dim_color(dot.color, 0.5);
+            canvas.draw_filled_circle_pri(cx, cy, r + 1, inner_glow, 3);
 
-        // Core circle (full color)
-        canvas.draw_filled_circle(cx, cy, effective_r, dot.color);
+            // Core circle (full brightness)
+            canvas.draw_filled_circle_pri(cx, cy, r, brighten_color(dot.color, 1.2), 4);
+        }
     }
 
     // ── Render canvas to paragraph ──────────────────────────────
