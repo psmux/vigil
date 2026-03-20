@@ -156,8 +156,41 @@ pub fn parse_proc_net_dev() -> Vec<(String, u64, u64)> {
 
 /// Read `/proc/{pid}/comm` to get the process name (trimmed).
 pub fn get_process_name(pid: u32) -> Option<String> {
-    let path = format!("/proc/{}/comm", pid);
-    fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+    // Try /proc/comm first
+    let comm_path = format!("/proc/{}/comm", pid);
+    let comm = fs::read_to_string(comm_path).ok().map(|s| s.trim().to_string());
+    
+    // If comm is a single char, digit, or empty — fall back to cmdline
+    if let Some(ref name) = comm {
+        if name.len() <= 1 || name.chars().all(|c| c.is_ascii_digit()) || name == "exe" {
+            // comm is useless (e.g., "1" from memfd processes), try cmdline
+            if let Some(cmdline) = get_process_cmdline(pid) {
+                // Extract binary name from first arg
+                let first_arg = cmdline.split_whitespace().next().unwrap_or("");
+                let binary = first_arg.rsplit('/').next().unwrap_or(first_arg);
+                if !binary.is_empty() && binary.len() > 1 {
+                    return Some(binary.to_string());
+                }
+            }
+            // Try exe symlink as last resort
+            let exe_path = format!("/proc/{}/exe", pid);
+            if let Ok(target) = fs::read_link(exe_path) {
+                let exe_name = target.to_string_lossy();
+                // Handle memfd: (deleted) executables
+                if exe_name.contains("memfd:") || exe_name.contains("(deleted)") {
+                    let name = exe_name.replace(" (deleted)", "").replace("memfd:", "");
+                    if !name.is_empty() {
+                        return Some(format!("[memfd:{}]", name.trim_start_matches('/')));
+                    }
+                }
+                let binary = exe_name.rsplit('/').next().unwrap_or("").to_string();
+                if !binary.is_empty() {
+                    return Some(binary);
+                }
+            }
+        }
+    }
+    comm
 }
 
 /// Read `/proc/{pid}/cmdline` (null-separated) and return as a space-separated string.

@@ -602,26 +602,26 @@ pub fn draw_world_map(
         canvas.place_text(col, row, label, LABEL_COLOR, 0);
     }
 
-    // Draw connection dots as hollow circles (rings)
+    // Draw connection dots — single bright pixel, preserves map shape
     for dot in dots {
         let (px, py) = project(dot.lon, dot.lat, px_w, px_h);
         let (jx, jy) = ip_jitter(dot.jitter_seed);
         let fx = (px + jx).clamp(0, px_w as i32 - 1);
         let fy = (py + jy).clamp(0, px_h as i32 - 1);
 
+        // Brightness pulse for attacks — single pixel only
         let color = if dot.pulsing {
             match animation_frame % 4 {
-                0 => dot.color,
-                1 => dim_color(dot.color, 0.7),
-                2 => dim_color(dot.color, 0.35),
-                _ => dim_color(dot.color, 0.7),
+                0 => Color::Rgb(255, 80, 80),   // bright red
+                1 => Color::Rgb(200, 50, 50),
+                2 => Color::Rgb(130, 30, 30),   // dim red
+                _ => Color::Rgb(200, 50, 50),
             }
         } else {
             dot.color
         };
 
-        let r = if dot.pulsing { 3 } else { 2 };
-        canvas.draw_circle_outline(fx, fy, r, color, 4);
+        // ONE pixel — that is all. No circles, no rings, no glow.
         canvas.set_dot_pri(fx, fy, color, 4);
     }
 
