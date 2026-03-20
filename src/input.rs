@@ -16,11 +16,12 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
         // Jump to view by number
         KeyCode::Char('1') => app.view = View::CommandCenter,
         KeyCode::Char('2') => app.view = View::AttackRadar,
-        KeyCode::Char('3') => app.view = View::Doors,
-        KeyCode::Char('4') => app.view = View::NetworkPulse,
-        KeyCode::Char('5') => app.view = View::Geography,
-        KeyCode::Char('6') => app.view = View::Topology,
-        KeyCode::Char('7') => app.view = View::SystemVitals,
+        KeyCode::Char('3') => app.view = View::Alerts,
+        KeyCode::Char('4') => app.view = View::Doors,
+        KeyCode::Char('5') => app.view = View::NetworkPulse,
+        KeyCode::Char('6') => app.view = View::Geography,
+        KeyCode::Char('7') => app.view = View::Topology,
+        KeyCode::Char('8') => app.view = View::SystemVitals,
 
         // Tab cycling
         KeyCode::Tab => {

@@ -178,26 +178,6 @@ impl BrailleCanvas {
         }
     }
 
-    /// Draw a hollow circle outline (ring) using midpoint circle algorithm.
-    pub fn draw_circle_outline(&mut self, cx: i32, cy: i32, radius: i32, color: Color, pri: u8) {
-        let mut x = radius;
-        let mut y = 0i32;
-        let mut err = 1 - radius;
-        while x >= y {
-            self.set_dot_pri(cx + x, cy + y, color, pri);
-            self.set_dot_pri(cx - x, cy + y, color, pri);
-            self.set_dot_pri(cx + x, cy - y, color, pri);
-            self.set_dot_pri(cx - x, cy - y, color, pri);
-            self.set_dot_pri(cx + y, cy + x, color, pri);
-            self.set_dot_pri(cx - y, cy + x, color, pri);
-            self.set_dot_pri(cx + y, cy - x, color, pri);
-            self.set_dot_pri(cx - y, cy - x, color, pri);
-            y += 1;
-            if err < 0 { err += 2 * y + 1; }
-            else { x -= 1; err += 2 * (y - x) + 1; }
-        }
-    }
-
     /// Place a text label on the canvas. Text characters will replace
     /// braille glyphs at the specified terminal cell positions.
     pub fn place_text(&mut self, col: usize, row: usize, text: &str, color: Color, pri: u8) {
@@ -291,8 +271,8 @@ fn project_cell(lon: f64, lat: f64, w: usize, h: usize) -> (usize, usize) {
 
 /// Deterministic per-IP pixel jitter (same approach as psnet).
 fn ip_jitter(seed: u32) -> (i32, i32) {
-    let x = ((seed.wrapping_mul(2654435761)) >> 24) as i32 % 3 - 1;
-    let y = ((seed.wrapping_mul(2246822519)) >> 24) as i32 % 3 - 1;
+    let x = ((seed.wrapping_mul(2654435761)) >> 24) as i32 % 7 - 3;
+    let y = ((seed.wrapping_mul(2246822519)) >> 24) as i32 % 5 - 2;
     (x, y)
 }
 
@@ -602,27 +582,52 @@ pub fn draw_world_map(
         canvas.place_text(col, row, label, LABEL_COLOR, 0);
     }
 
-    // Draw connection dots as hollow circles (rings)
+    // ── Draw dots ───────────────────────────────────────────────
     for dot in dots {
         let (px, py) = project(dot.lon, dot.lat, px_w, px_h);
         let (jx, jy) = ip_jitter(dot.jitter_seed);
-        let fx = (px + jx).clamp(0, px_w as i32 - 1);
-        let fy = (py + jy).clamp(0, px_h as i32 - 1);
+        let cx = px + jx;
+        let cy = py + jy;
+        let r = dot.radius as i32;
 
-        let color = if dot.pulsing {
-            match animation_frame % 4 {
-                0 => dot.color,
-                1 => dim_color(dot.color, 0.7),
-                2 => dim_color(dot.color, 0.35),
-                _ => dim_color(dot.color, 0.7),
-            }
+        if dot.pulsing {
+            // Pulsing animation: cycle through 4 phases for smooth flash
+            let phase = animation_frame % 4;
+            let (effective_r, core_factor) = match phase {
+                0 => (r + 1, 1.0),   // bright, expanded
+                1 => (r, 0.5),       // dim, normal
+                2 => (r + 1, 0.9),   // bright-ish, expanded
+                _ => (r, 0.35),      // dimmer, normal
+            };
+
+            // Outer glow ring (larger for pulsing dots)
+            let glow_color = dim_color(dot.color, 0.2);
+            canvas.draw_filled_circle_pri(cx, cy, effective_r + 2, glow_color, 2);
+
+            // Middle glow
+            let mid_glow = dim_color(dot.color, 0.45);
+            canvas.draw_filled_circle_pri(cx, cy, effective_r + 1, mid_glow, 3);
+
+            // Core circle (pulsing brightness)
+            let core_color = if core_factor < 1.0 {
+                dim_color(dot.color, core_factor)
+            } else {
+                dot.color
+            };
+            canvas.draw_filled_circle_pri(cx, cy, effective_r, core_color, 4);
         } else {
-            dot.color
-        };
+            // Non-pulsing: static dot with bright glow
+            // Outer glow ring
+            let glow_color = dim_color(dot.color, 0.25);
+            canvas.draw_filled_circle_pri(cx, cy, r + 2, glow_color, 2);
 
-        let r = if dot.pulsing { 3 } else { 2 };
-        canvas.draw_circle_outline(fx, fy, r, color, 4);
-        canvas.set_dot_pri(fx, fy, color, 4);
+            // Inner glow
+            let inner_glow = dim_color(dot.color, 0.5);
+            canvas.draw_filled_circle_pri(cx, cy, r + 1, inner_glow, 3);
+
+            // Core circle (full brightness)
+            canvas.draw_filled_circle_pri(cx, cy, r, brighten_color(dot.color, 1.2), 4);
+        }
     }
 
     // ── Render canvas to paragraph ──────────────────────────────

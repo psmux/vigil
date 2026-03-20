@@ -10,13 +10,13 @@ use crate::theme;
 /// Draw the view-selector tab bar.
 ///
 /// ```text
-/// [1:Cmd] [2:Atk] [3:Door] [4:Net] [5:Geo] [6:Topo] [7:Sys]
+/// [1:Cmd] [2:Atk] [3:Alert] [4:Door] [5:Net] [6:Geo] [7:Topo] [8:Sys]
 /// ```
 ///
 /// The active view is highlighted with `TAB_ACTIVE_FG` on `TAB_ACTIVE_BG` and bold.
 /// Inactive tabs use `TEXT_DIM` on `TAB_BG`.
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
-    let short_labels = ["Cmd", "Atk", "Door", "Net", "Geo", "Topo", "Sys"];
+    let short_labels = ["Cmd", "Atk", "Alert", "Door", "Net", "Geo", "Topo", "Sys"];
 
     let mut spans: Vec<Span> = Vec::new();
 
@@ -24,10 +24,25 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         let label = format!("[{}:{}]", i + 1, short_labels[i]);
 
         let is_active = app.view == *view;
+
+        // For the Alerts tab, show unread indicator when not active
+        let has_unread = *view == View::Alerts && app.alert_engine.unread_count() > 0;
+
         let style = if is_active {
             Style::default()
                 .fg(theme::TAB_ACTIVE_FG)
                 .bg(theme::TAB_ACTIVE_BG)
+                .add_modifier(Modifier::BOLD)
+        } else if has_unread {
+            // Highlight alerts tab when there are unread alerts
+            let severity_color = match app.alert_engine.highest_unread_severity() {
+                Some(crate::data::alerts::AlertSeverity::Crit) => theme::DANGER,
+                Some(crate::data::alerts::AlertSeverity::Warn) => theme::WARN,
+                _ => theme::ACCENT,
+            };
+            Style::default()
+                .fg(severity_color)
+                .bg(theme::TAB_BG)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()

@@ -15,6 +15,7 @@ pub enum AlertKind {
     SshBruteForce { source_ip: String, attempts: u32 },
     NewListeningPort { port: u16, process: String, bind: String },
     BandwidthSpike { direction: String, bps: f64, threshold: f64 },
+    BandwidthAnomaly { process: String, current_bps: f64, avg_bps: f64 },
     ServiceDown { name: String },
     ServiceUp { name: String },
     NewConnection { process: String, remote: String },
@@ -39,6 +40,51 @@ pub struct Alert {
     pub read: bool,
 }
 
+// ─── Alert categories ──────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlertCategory {
+    Security,
+    Network,
+    Bandwidth,
+    System,
+}
+
+impl AlertCategory {
+    pub const ALL: [AlertCategory; 4] = [
+        AlertCategory::Security,
+        AlertCategory::Network,
+        AlertCategory::Bandwidth,
+        AlertCategory::System,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Security => "Security",
+            Self::Network => "Network Activity",
+            Self::Bandwidth => "Bandwidth",
+            Self::System => "System",
+        }
+    }
+}
+
+impl Alert {
+    pub fn category(&self) -> AlertCategory {
+        match &self.kind {
+            AlertKind::SshBruteForce { .. } => AlertCategory::Security,
+            AlertKind::ThreatConnection { .. } => AlertCategory::Security,
+            AlertKind::PortExposed { .. } => AlertCategory::Security,
+            AlertKind::FirewallChange => AlertCategory::Security,
+            AlertKind::NewConnection { .. } => AlertCategory::Network,
+            AlertKind::NewListeningPort { .. } => AlertCategory::System,
+            AlertKind::BandwidthSpike { .. } => AlertCategory::Bandwidth,
+            AlertKind::BandwidthAnomaly { .. } => AlertCategory::Bandwidth,
+            AlertKind::ServiceDown { .. } => AlertCategory::System,
+            AlertKind::ServiceUp { .. } => AlertCategory::System,
+        }
+    }
+}
+
 // ─── Alert engine ──────────────────────────────────────────────────
 
 pub struct AlertEngine {
@@ -59,6 +105,12 @@ pub struct AlertEngine {
     recent_messages: VecDeque<String>,
     dedup_window: usize,
 
+    // New outbound connection tracking
+    known_connections: HashSet<String>,
+
+    // Per-app bandwidth anomaly tracking (process -> rolling window of bandwidth samples)
+    app_bandwidth_history: HashMap<String, VecDeque<f64>>,
+
     // Track whether first tick has run (suppress initial noise)
     initialized: bool,
 }
@@ -76,6 +128,8 @@ impl AlertEngine {
             brute_alerted: HashSet::new(),
             recent_messages: VecDeque::with_capacity(50),
             dedup_window: 50,
+            known_connections: HashSet::new(),
+            app_bandwidth_history: HashMap::new(),
             initialized: false,
         }
     }
@@ -86,6 +140,7 @@ impl AlertEngine {
         &mut self,
         ports: &[ListeningPort],
         services: &[ServiceStatus],
+        connections: &[Connection],
     ) {
         for p in ports {
             self.known_ports.insert(p.port);
@@ -93,6 +148,21 @@ impl AlertEngine {
         }
         for s in services {
             self.prev_services.insert(s.name.clone(), s.active);
+        }
+        // Seed known connections so initial outbound connections don't trigger alerts
+        for conn in connections {
+            if conn.state == crate::data::TcpState::Established
+                && conn.direction == crate::data::Direction::Outbound
+            {
+                let proc_name = conn.process_name.clone().unwrap_or_default();
+                if !proc_name.is_empty() {
+                    let remote_ip = conn.remote_addr.ip();
+                    if !crate::data::geoip::is_private_ip(remote_ip) {
+                        let key = format!("{}:{}", proc_name, remote_ip);
+                        self.known_connections.insert(key);
+                    }
+                }
+            }
         }
         self.initialized = true;
     }
@@ -294,6 +364,112 @@ impl AlertEngine {
         }
     }
 
+    /// Detect new outbound connections from known processes.
+    pub fn check_new_connections(&mut self, connections: &[Connection]) {
+        if !self.initialized {
+            return;
+        }
+
+        for conn in connections {
+            if conn.state != crate::data::TcpState::Established {
+                continue;
+            }
+            if conn.direction != crate::data::Direction::Outbound {
+                continue;
+            }
+            let proc_name = conn.process_name.clone().unwrap_or_default();
+            if proc_name.is_empty() {
+                continue;
+            }
+            let remote_ip = conn.remote_addr.ip();
+            if crate::data::geoip::is_private_ip(remote_ip) {
+                continue;
+            }
+            let key = format!("{}:{}", proc_name, remote_ip);
+            if self.known_connections.insert(key) {
+                let country = conn
+                    .geo
+                    .as_ref()
+                    .map(|g| g.country_code.clone())
+                    .unwrap_or_else(|| "??".into());
+                self.push_alert(
+                    AlertKind::NewConnection {
+                        process: proc_name.clone(),
+                        remote: remote_ip.to_string(),
+                    },
+                    AlertSeverity::Info,
+                    format!(
+                        "New outbound: {} \u{2192} {} ({})",
+                        proc_name, remote_ip, country
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Detect per-app bandwidth anomalies (current > 5x rolling average).
+    pub fn check_bandwidth_anomaly(&mut self, connections: &[Connection]) {
+        if !self.initialized {
+            return;
+        }
+
+        // Aggregate bandwidth by process
+        let mut per_proc: HashMap<String, f64> = HashMap::new();
+        for conn in connections {
+            if conn.state != crate::data::TcpState::Established {
+                continue;
+            }
+            let proc_name = conn.process_name.clone().unwrap_or_default();
+            if proc_name.is_empty() {
+                continue;
+            }
+            *per_proc.entry(proc_name).or_insert(0.0) += conn.rx_bps + conn.tx_bps;
+        }
+
+        // Collect alerts separately to avoid borrow conflicts
+        let mut pending_alerts: Vec<(String, f64, f64)> = Vec::new();
+
+        for (proc_name, current_bps) in &per_proc {
+            let history = self
+                .app_bandwidth_history
+                .entry(proc_name.clone())
+                .or_insert_with(|| VecDeque::with_capacity(60));
+
+            // Calculate rolling average
+            if history.len() >= 10 {
+                let avg: f64 = history.iter().sum::<f64>() / history.len() as f64;
+                // Only alert if average is meaningful (> 1 KB/s) and current is 5x
+                if avg > 1024.0 && *current_bps > avg * 5.0 {
+                    pending_alerts.push((proc_name.clone(), *current_bps, avg));
+                }
+            }
+
+            // Push current sample
+            history.push_back(*current_bps);
+            if history.len() > 60 {
+                history.pop_front();
+            }
+        }
+
+        for (proc_name, current_bps, avg) in pending_alerts {
+            self.push_alert(
+                AlertKind::BandwidthAnomaly {
+                    process: proc_name.clone(),
+                    current_bps,
+                    avg_bps: avg,
+                },
+                AlertSeverity::Warn,
+                format!(
+                    "{}: {:.1}x baseline ({:.0} KB/s vs {:.0} KB/s avg)",
+                    proc_name,
+                    current_bps / avg,
+                    current_bps / 1024.0,
+                    avg / 1024.0,
+                ),
+            );
+        }
+    }
+
     // ── Core ────────────────────────────────────────────────────────
 
     fn push_alert(&mut self, kind: AlertKind, severity: AlertSeverity, message: String) {
@@ -349,6 +525,20 @@ impl AlertEngine {
 
     pub fn recent(&self, n: usize) -> Vec<&Alert> {
         self.alerts.iter().rev().take(n).collect()
+    }
+
+    /// Return alerts filtered by category.
+    pub fn by_category(&self, cat: AlertCategory) -> Vec<&Alert> {
+        self.alerts
+            .iter()
+            .filter(|a| a.category() == cat)
+            .rev()
+            .collect()
+    }
+
+    /// Count alerts by severity.
+    pub fn count_by_severity(&self, severity: AlertSeverity) -> usize {
+        self.alerts.iter().filter(|a| a.severity == severity).count()
     }
 
     pub fn mark_all_read(&mut self) {

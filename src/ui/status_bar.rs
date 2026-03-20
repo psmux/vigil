@@ -10,17 +10,18 @@ use crate::theme;
 /// Draw the bottom status bar with key hints.
 ///
 /// ```text
-/// q:Quit  1-7:View  Tab:Next  j/k:Scroll  z:Pause  ?:Help
+/// q:Quit  1-8:View  Tab:Next  j/k:Scroll  z:Pause  ?:Help
 /// ```
 ///
 /// Key names are in `GOLD` bold; descriptions in `TEXT_DIM`.
 pub fn draw(f: &mut Frame, _app: &App, area: Rect) {
     let hints: &[(&str, &str)] = &[
         ("q", "Quit"),
-        ("1-6", "View"),
+        ("1-8", "View"),
         ("Tab", "Next"),
         ("j/k", "Scroll"),
         ("z", "Pause"),
+        ("a", "ReadAlerts"),
         ("?", "Help"),
     ];
 

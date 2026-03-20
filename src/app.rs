@@ -18,6 +18,7 @@ use crate::score;
 pub enum View {
     CommandCenter,
     AttackRadar,
+    Alerts,
     Doors,
     NetworkPulse,
     Geography,
@@ -26,9 +27,10 @@ pub enum View {
 }
 
 impl View {
-    pub const ALL: [View; 7] = [
+    pub const ALL: [View; 8] = [
         View::CommandCenter,
         View::AttackRadar,
+        View::Alerts,
         View::Doors,
         View::NetworkPulse,
         View::Geography,
@@ -50,6 +52,7 @@ impl View {
         match self {
             Self::CommandCenter => "Command Center",
             Self::AttackRadar => "Attack Radar",
+            Self::Alerts => "Alerts",
             Self::Doors => "Doors",
             Self::NetworkPulse => "Network Pulse",
             Self::Geography => "Geography",
@@ -62,11 +65,12 @@ impl View {
         match self {
             Self::CommandCenter => 0,
             Self::AttackRadar => 1,
-            Self::Doors => 2,
-            Self::NetworkPulse => 3,
-            Self::Geography => 4,
-            Self::Topology => 5,
-            Self::SystemVitals => 6,
+            Self::Alerts => 2,
+            Self::Doors => 3,
+            Self::NetworkPulse => 4,
+            Self::Geography => 5,
+            Self::Topology => 6,
+            Self::SystemVitals => 7,
         }
     }
 
@@ -478,7 +482,7 @@ impl App {
         // ── Alert engine ────────────────────────────────────────────
         // Initialize on first tick so baseline state is captured
         if self.tick_count == 1 {
-            self.alert_engine.initialize(&self.ports, &self.services);
+            self.alert_engine.initialize(&self.ports, &self.services, &self.connections);
         }
 
         // Run alert checks (every 2 ticks to avoid excessive CPU)
@@ -489,6 +493,8 @@ impl App {
             self.alert_engine.check_services(&self.services);
             self.alert_engine.check_threats(&self.connections);
             self.alert_engine.check_exposed_ports(&self.ports);
+            self.alert_engine.check_new_connections(&self.connections);
+            self.alert_engine.check_bandwidth_anomaly(&self.connections);
         }
     }
 
