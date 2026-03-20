@@ -44,7 +44,16 @@ pub fn collect_connections() -> Vec<Connection> {
         let state = TcpState::from_u8(raw.state);
 
         let pid = inode_map.get(&raw.inode).copied();
-        let process_name = pid.and_then(procfs::get_process_name);
+        let process_name = pid.and_then(procfs::get_process_name).or_else(|| {
+            // Sockets with inode=0 are kernel-owned (TIME_WAIT/CLOSE)
+            // No process owns them — label based on TCP state
+            match state {
+                TcpState::TimeWait => Some("[time-wait]".to_string()),
+                TcpState::Close => Some("[closed]".to_string()),
+                TcpState::CloseWait => Some("[close-wait]".to_string()),
+                _ => Some("[kernel]".to_string()),
+            }
+        });
         let user = pid
             .and_then(procfs::get_process_uid)
             .and_then(uid_to_username);
@@ -109,10 +118,8 @@ pub fn aggregate_by_country(conns: &[Connection]) -> Vec<(String, u32)> {
 pub fn aggregate_by_process(conns: &[Connection]) -> Vec<(String, u32)> {
     let mut counts = std::collections::HashMap::new();
     for c in conns {
-        let name = c
-            .process_name
-            .clone()
-            .unwrap_or_else(|| "<unknown>".to_string());
+        let name = c.process_name.clone().unwrap_or_else(|| "[kernel]".to_string());
+        if name.starts_with("[") { continue; } // Skip kernel-owned sockets from top apps
         *counts.entry(name).or_insert(0u32) += 1;
     }
     let mut result: Vec<_> = counts.into_iter().collect();
