@@ -10,13 +10,13 @@ use crate::theme;
 /// Draw the view-selector tab bar.
 ///
 /// ```text
-/// [1:Cmd] [2:Atk] [3:Door] [4:Net] [5:Geo] [6:Sys]
+/// [1:Cmd] [2:Atk] [3:Door] [4:Net] [5:Geo] [6:Topo] [7:Sys]
 /// ```
 ///
 /// The active view is highlighted with `TAB_ACTIVE_FG` on `TAB_ACTIVE_BG` and bold.
 /// Inactive tabs use `TEXT_DIM` on `TAB_BG`.
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
-    let short_labels = ["Cmd", "Atk", "Door", "Net", "Geo", "Sys"];
+    let short_labels = ["Cmd", "Atk", "Door", "Net", "Geo", "Topo", "Sys"];
 
     let mut spans: Vec<Span> = Vec::new();
 

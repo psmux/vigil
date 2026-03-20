@@ -140,10 +140,34 @@ fn spawn_data_threads(tx: mpsc::Sender<DataUpdate>, _config: &VigilConfig) {
 
     // 5. Fail2ban monitor — polls fail2ban-client for banned IPs
     {
-        #[allow(clippy::redundant_clone)]
         let tx = tx.clone();
         std::thread::spawn(move || {
             data::fail2ban::fail2ban_monitor_thread(tx);
+        });
+    }
+
+    // 6. DNS resolver — reverse-lookups for remote IPs every 5s
+    {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            use std::collections::HashSet;
+            use std::net::IpAddr;
+            let mut resolved: HashSet<IpAddr> = HashSet::new();
+            loop {
+                let conns = data::connections::collect_connections();
+                for conn in &conns {
+                    let ip = conn.remote_addr.ip();
+                    if !data::geoip::is_private_ip(ip) && !ip.is_loopback() && !resolved.contains(&ip) {
+                        if let Ok(hostname) = dns_lookup::lookup_addr(&ip) {
+                            if hostname != ip.to_string() {
+                                let _ = tx.send(DataUpdate::DnsResolved(ip, hostname));
+                            }
+                        }
+                        resolved.insert(ip);
+                    }
+                }
+                std::thread::sleep(Duration::from_secs(5));
+            }
         });
     }
 }

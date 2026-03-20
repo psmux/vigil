@@ -19,7 +19,8 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
         KeyCode::Char('3') => app.view = View::Doors,
         KeyCode::Char('4') => app.view = View::NetworkPulse,
         KeyCode::Char('5') => app.view = View::Geography,
-        KeyCode::Char('6') => app.view = View::SystemVitals,
+        KeyCode::Char('6') => app.view = View::Topology,
+        KeyCode::Char('7') => app.view = View::SystemVitals,
 
         // Tab cycling
         KeyCode::Tab => {
@@ -47,8 +48,15 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
             app.paused = !app.paused;
         }
 
-        // Help overlay (TODO)
-        KeyCode::Char('?') => {}
+        // Help overlay toggle
+        KeyCode::Char('?') => {
+            app.show_help = !app.show_help;
+        }
+
+        // Mark all alerts as read
+        KeyCode::Char('a') => {
+            app.mark_alerts_read();
+        }
 
         _ => {}
     }

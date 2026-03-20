@@ -70,6 +70,8 @@ pub fn collect_connections() -> Vec<Connection> {
             geo,
             is_threat,
             direction,
+            rx_bps: 0.0,
+            tx_bps: 0.0,
         });
     }
 

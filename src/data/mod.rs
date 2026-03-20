@@ -9,6 +9,10 @@ pub mod fail2ban;
 pub mod geoip;
 pub mod threat;
 pub mod system;
+pub mod alerts;
+pub mod protocols;
+pub mod servers;
+pub mod discovery;
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
@@ -39,6 +43,8 @@ pub struct Connection {
     pub geo: Option<GeoLocation>,
     pub is_threat: bool,
     pub direction: Direction,
+    pub rx_bps: f64,
+    pub tx_bps: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

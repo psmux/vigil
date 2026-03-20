@@ -5,13 +5,14 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::App;
+use crate::data::alerts::AlertSeverity;
 use crate::format::format_bps;
 use crate::theme;
 
 /// Draw the always-visible top bar.
 ///
 /// ```text
-/// VIGIL ── hostname ── HH:MM:SS UTC ── ↓rx ↑tx ── N conns ── N threats ── Score: NN
+/// VIGIL ── hostname ── HH:MM:SS UTC ── ↓rx ↑tx ── N conns ── N threats ── Score: NN ── N alerts
 /// ```
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let now = chrono::Utc::now();
@@ -25,7 +26,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(theme::SEPARATOR),
     );
 
-    let spans = vec![
+    let mut spans = vec![
         Span::styled(
             "VIGIL",
             Style::default()
@@ -59,7 +60,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             format!("{} threats", threat_count),
             Style::default().fg(if threat_count > 0 { theme::DANGER } else { theme::TEXT }),
         ),
-        sep,
+        sep.clone(),
         Span::styled("Score: ", Style::default().fg(theme::TEXT)),
         Span::styled(
             format!("{}", app.security_score),
@@ -68,6 +69,26 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
     ];
+
+    // ── Alert indicator ─────────────────────────────────────────
+    let unread = app.alert_engine.unread_count();
+    if unread > 0 {
+        let alert_color = match app.alert_engine.highest_unread_severity() {
+            Some(AlertSeverity::Crit) => theme::DANGER,  // red
+            Some(AlertSeverity::Warn) => theme::GOLD,    // gold
+            Some(AlertSeverity::Info) => theme::BLUE,    // blue
+            None => theme::TEXT,
+        };
+
+        spans.push(sep);
+        // Bell character: U+1F514 (🔔) — use a simple text marker for TUI compatibility
+        spans.push(Span::styled(
+            format!("\u{25C6} {} alert{}", unread, if unread == 1 { "" } else { "s" }),
+            Style::default()
+                .fg(alert_color)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
 
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line).style(Style::default().bg(theme::BG));

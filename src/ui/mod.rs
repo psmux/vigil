@@ -6,6 +6,7 @@ pub mod attack_radar;
 pub mod doors;
 pub mod network_pulse;
 pub mod geography;
+pub mod topology;
 pub mod system_vitals;
 
 use ratatui::layout::{Constraint, Layout, Direction};
@@ -37,6 +38,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         View::Doors        => doors::draw(f, app, chunks[2]),
         View::NetworkPulse => network_pulse::draw(f, app, chunks[2]),
         View::Geography    => geography::draw(f, app, chunks[2]),
+        View::Topology     => topology::draw(f, app, chunks[2]),
         View::SystemVitals => system_vitals::draw(f, app, chunks[2]),
     }
 

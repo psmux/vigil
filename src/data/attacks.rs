@@ -39,7 +39,7 @@ fn tail_auth_log(tx: &mpsc::Sender<DataUpdate>) -> Result<(), ()> {
     use std::process::{Command, Stdio};
 
     let child = Command::new("tail")
-        .args(["-F", "-n", "0", "/var/log/auth.log"])
+        .args(["-F", "-n", "500", "/var/log/auth.log"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -66,7 +66,7 @@ fn tail_journalctl(tx: &mpsc::Sender<DataUpdate>) -> Result<(), ()> {
     use std::process::{Command, Stdio};
 
     let child = Command::new("journalctl")
-        .args(["-u", "sshd", "-f", "--no-pager", "-n", "0"])
+        .args(["-u", "sshd", "-f", "--no-pager", "-n", "500"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()

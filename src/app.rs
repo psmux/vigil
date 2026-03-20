@@ -7,6 +7,10 @@ use chrono::{DateTime, Utc};
 
 use crate::data;
 use crate::data::*;
+use crate::data::protocols::{self, AppProtocol};
+use crate::data::servers::{self, ServerInfo};
+use crate::data::alerts::{AlertEngine, AlertSeverity};
+use crate::data::discovery::LanDevice;
 use crate::score;
 
 // ─── View enum ────────────────────────────────────────────────────
@@ -17,16 +21,18 @@ pub enum View {
     Doors,
     NetworkPulse,
     Geography,
+    Topology,
     SystemVitals,
 }
 
 impl View {
-    pub const ALL: [View; 6] = [
+    pub const ALL: [View; 7] = [
         View::CommandCenter,
         View::AttackRadar,
         View::Doors,
         View::NetworkPulse,
         View::Geography,
+        View::Topology,
         View::SystemVitals,
     ];
 
@@ -47,6 +53,7 @@ impl View {
             Self::Doors => "Doors",
             Self::NetworkPulse => "Network Pulse",
             Self::Geography => "Geography",
+            Self::Topology => "Topology",
             Self::SystemVitals => "System Vitals",
         }
     }
@@ -58,7 +65,8 @@ impl View {
             Self::Doors => 2,
             Self::NetworkPulse => 3,
             Self::Geography => 4,
-            Self::SystemVitals => 5,
+            Self::Topology => 5,
+            Self::SystemVitals => 6,
         }
     }
 
@@ -139,9 +147,23 @@ pub struct App {
 
     // UI state
     pub scroll_offset: usize,
+    /// Whether the help overlay is visible.
+    pub show_help: bool,
+
+    // Protocol tracking
+    pub protocol_counts: HashMap<AppProtocol, u32>,
+    pub server_info: Vec<ServerInfo>,
+
+    // Network topology / discovery
+    pub gateway: Option<IpAddr>,
+    pub dns_servers: Vec<IpAddr>,
+    pub neighbors: Vec<LanDevice>,
 
     // Aggregated stats
     pub top_attacker_countries: Vec<(String, u32)>,
+
+    // Alert engine
+    pub alert_engine: AlertEngine,
 
     // Data collection
     system_collector: Option<data::system::SystemCollector>,
@@ -155,6 +177,11 @@ impl App {
         // Collect services and interfaces eagerly so the first frame is populated
         let services = data::system::collect_services();
         let interfaces = data::system::collect_interfaces();
+
+        // Eagerly collect network topology info
+        let gateway = data::discovery::get_gateway();
+        let dns_servers = data::discovery::get_dns_servers();
+        let neighbors = data::discovery::discover_neighbors();
 
         Self {
             view: View::CommandCenter,
@@ -201,8 +228,18 @@ impl App {
             firewall_active: false,
 
             scroll_offset: 0,
+            show_help: false,
+
+            protocol_counts: HashMap::new(),
+            server_info: Vec::new(),
+
+            gateway,
+            dns_servers,
+            neighbors,
 
             top_attacker_countries: Vec::new(),
+
+            alert_engine: AlertEngine::new(),
 
             system_collector: Some(data::system::SystemCollector::new()),
             tick_start: Instant::now(),
@@ -308,6 +345,11 @@ impl App {
         self.attackers_sorted = sorted;
     }
 
+    /// Mark all alerts as read.
+    pub fn mark_alerts_read(&mut self) {
+        self.alert_engine.mark_all_read();
+    }
+
     /// Called every tick interval (1 second).
     pub fn tick(&mut self) {
         self.tick_count += 1;
@@ -371,6 +413,23 @@ impl App {
             }
         }
 
+        // ── Per-connection bandwidth estimation ─────────────────────
+        {
+            let established_indices: Vec<usize> = self.connections.iter().enumerate()
+                .filter(|(_, c)| c.state == TcpState::Established)
+                .map(|(i, _)| i)
+                .collect();
+            if !established_indices.is_empty() {
+                let count = established_indices.len() as f64;
+                let per_conn_rx = self.current_rx_bps / count;
+                let per_conn_tx = self.current_tx_bps / count;
+                for i in established_indices {
+                    self.connections[i].rx_bps = per_conn_rx;
+                    self.connections[i].tx_bps = per_conn_tx;
+                }
+            }
+        }
+
         // ── Attack country enrichment (catch any IPs missed earlier) ─
         let attack_ips: Vec<IpAddr> = self
             .attacks
@@ -387,6 +446,23 @@ impl App {
 
         self.recalc_top_attacker_countries();
 
+        // ── Protocol classification (every 5 ticks) ─────────────────
+        if self.tick_count % 5 == 0 {
+            self.protocol_counts = protocols::classify_connections(&self.connections);
+        }
+
+        // ── Server detection (every 30 ticks) ───────────────────────
+        if self.tick_count % 30 == 0 {
+            self.server_info = servers::detect_servers(&self.ports);
+        }
+
+        // ── Network topology refresh (every 30 ticks) ───────────────
+        if self.tick_count % 30 == 0 {
+            self.gateway = data::discovery::get_gateway();
+            self.dns_servers = data::discovery::get_dns_servers();
+            self.neighbors = data::discovery::discover_neighbors();
+        }
+
         // ── Security score (every 5 ticks) ──────────────────────────
         if self.tick_count % 5 == 0 {
             let (new_score, _factors) = score::compute_score(self);
@@ -396,6 +472,22 @@ impl App {
             if elapsed_secs >= 3600 {
                 self.score_delta_1h = 0;
             }
+        }
+
+        // ── Alert engine ────────────────────────────────────────────
+        // Initialize on first tick so baseline state is captured
+        if self.tick_count == 1 {
+            self.alert_engine.initialize(&self.ports, &self.services);
+        }
+
+        // Run alert checks (every 2 ticks to avoid excessive CPU)
+        if self.tick_count % 2 == 0 {
+            self.alert_engine.check_attacks(&self.attacks, &self.banned_ips);
+            self.alert_engine.check_new_ports(&self.ports);
+            self.alert_engine.check_bandwidth(self.current_rx_bps, self.current_tx_bps);
+            self.alert_engine.check_services(&self.services);
+            self.alert_engine.check_threats(&self.connections);
+            self.alert_engine.check_exposed_ports(&self.ports);
         }
     }
 

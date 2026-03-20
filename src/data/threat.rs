@@ -1,57 +1,48 @@
-//! Threat IP checker — stub for IP reputation lookups.
+//! Threat IP checker — embeds the IPsum level-3 threat list at compile time.
 //!
-//! TODO: Embed a threat IP list at compile time:
-//!   static THREAT_IPS_RAW: &str = include_str!("../../assets/threat_ips.txt");
-//!
-//! The threat_ips.txt file should contain one IP per line (comments with #).
-//! Sources: abuse.ch, emerging threats, firehol blocklists.
+//! The threat_ips.txt file contains one IP per line sourced from
+//! https://github.com/stamparm/ipsum (IPs reported by 3+ blacklists).
 
 use std::collections::HashSet;
 use std::net::IpAddr;
+use std::sync::OnceLock;
 
-/// Check if an IP is in the known-threat set.
-///
-/// Currently a stub that always returns false.
-/// Will be replaced with a lookup into `init_threat_set()` once the
-/// threat IP list is embedded.
-pub fn is_threat_ip(_ip: &IpAddr) -> bool {
-    // TODO: use a lazy_static or OnceLock with init_threat_set()
-    false
+/// Raw embedded threat-IP data (one IP per line, blank lines ignored).
+static THREAT_DATA: &str = include_str!("../../assets/threat_ips.txt");
+
+/// Lazily-initialized set of known-bad IPs.
+static THREAT_SET: OnceLock<HashSet<IpAddr>> = OnceLock::new();
+
+/// Initialize (or return) the threat IP set from embedded data.
+fn init_threat_set() -> &'static HashSet<IpAddr> {
+    THREAT_SET.get_or_init(|| {
+        THREAT_DATA
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .filter_map(|l| l.trim().parse::<IpAddr>().ok())
+            .collect()
+    })
 }
 
-/// Initialize the threat IP set from embedded data.
-///
-/// Currently returns an empty set (placeholder).
-/// Future implementation will parse include_str!("../../assets/threat_ips.txt")
-/// and populate the set.
-pub fn init_threat_set() -> HashSet<IpAddr> {
-    // TODO: parse threat_ips.txt lines into IpAddr
-    //
-    // Example future implementation:
-    //
-    //   THREAT_IPS_RAW
-    //       .lines()
-    //       .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-    //       .filter_map(|l| l.trim().parse::<IpAddr>().ok())
-    //       .collect()
-    //
-    HashSet::new()
+/// Check if an IP is in the known-threat set.
+pub fn is_threat_ip(ip: &IpAddr) -> bool {
+    init_threat_set().contains(ip)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
 
     #[test]
-    fn test_stub_returns_false() {
-        let ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
-        assert!(!is_threat_ip(&ip));
+    fn test_threat_set_loads() {
+        let set = init_threat_set();
+        // Should have thousands of entries from the IPsum list
+        assert!(set.len() > 1000, "Expected >1000 threat IPs, got {}", set.len());
     }
 
     #[test]
-    fn test_init_empty() {
-        let set = init_threat_set();
-        assert!(set.is_empty());
+    fn test_private_ip_not_threat() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        assert!(!is_threat_ip(&ip));
     }
 }

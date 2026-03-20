@@ -6,6 +6,7 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::data::PortRisk;
+use crate::data::alerts::AlertSeverity;
 use crate::format::{format_bps, format_count};
 use crate::theme;
 use crate::widgets::bar_chart::{self, BarItem};
@@ -19,7 +20,7 @@ use crate::widgets::sparkline;
 /// Layout:
 /// ```text
 /// top_row (45%):  [ score_gauge (20%) | attack_map (80%) ]
-/// kpi_strip (5):  [ ATTACKS | DOORS | CONNS | BLOCKED | BANNED ]
+/// kpi_strip (5):  [ ATTACKS | DOORS | CONNS | BLOCKED | BANNED | ALERTS ]
 /// bottom_row:     [ bandwidth_sparklines (40%) | top_attackers_bar (60%) ]
 /// doors_strip (3): compact port exposure summary
 /// ```
@@ -116,11 +117,12 @@ fn draw_kpi_strip(f: &mut Frame, app: &App, area: Rect) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
+            Constraint::Ratio(1, 6),
+            Constraint::Ratio(1, 6),
+            Constraint::Ratio(1, 6),
+            Constraint::Ratio(1, 6),
+            Constraint::Ratio(1, 6),
+            Constraint::Ratio(1, 6),
         ])
         .split(area);
 
@@ -180,6 +182,24 @@ fn draw_kpi_strip(f: &mut Frame, app: &App, area: Rect) {
         &format_count(app.banned_ips.len() as u64),
         "IPs",
         theme::PURPLE,
+    );
+
+    // ALERTS — unread alert count with severity-based coloring
+    let unread = app.alert_engine.unread_count();
+    let alert_color = match app.alert_engine.highest_unread_severity() {
+        Some(AlertSeverity::Crit) => theme::DANGER,
+        Some(AlertSeverity::Warn) => theme::GOLD,
+        Some(AlertSeverity::Info) => theme::BLUE,
+        None => theme::SAFE,
+    };
+    let alert_subtitle = if unread == 0 { "all clear" } else { "unread" };
+    kpi_badge::draw_kpi_badge(
+        f,
+        cols[5],
+        "ALERTS",
+        &format_count(unread as u64),
+        alert_subtitle,
+        alert_color,
     );
 }
 
