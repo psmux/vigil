@@ -1,0 +1,28 @@
+[package]
+name = "vigil"
+version = "0.1.0"
+edition = "2021"
+description = "Real-time Linux server security dashboard — beautiful TUI with attack maps, gauges, and sparklines"
+license = "MIT"
+
+[[bin]]
+name = "vigil"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+sysinfo = "0.32"
+chrono = "0.4"
+maxminddb = "0.24"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dns-lookup = "2"
+anyhow = "1"
+dirs = "5"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1
