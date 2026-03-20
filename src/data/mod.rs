@@ -121,7 +121,7 @@ pub struct ListeningPort {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PortRisk { Safe, Exposed, Critical }
+pub enum PortRisk { Safe, Shielded, Exposed, Critical }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthMethod { KeyAuth, PasswordAuth, JwtAuth, TokenAuth, NoAuth, Unknown }
@@ -143,6 +143,7 @@ impl PortRisk {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Safe => "SAFE",
+            Self::Shielded => "SHIELDED",
             Self::Exposed => "EXPOSED",
             Self::Critical => "CRITICAL",
         }

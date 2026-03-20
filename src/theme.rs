@@ -28,6 +28,8 @@ pub const CYAN: Color = Color::Rgb(80, 200, 255);
 pub const PURPLE: Color = Color::Rgb(180, 100, 255);
 
 // ─── Attack ───────────────────────────────────────────────────────
+pub const SHIELDED: Color = Color::Rgb(100, 180, 255);
+
 pub const ATTACK: Color = Color::Rgb(255, 40, 40);
 
 // ─── Bandwidth ────────────────────────────────────────────────────
@@ -58,6 +60,7 @@ pub fn score_color(score: u8) -> Color {
 pub fn risk_color(risk: PortRisk) -> Color {
     match risk {
         PortRisk::Safe => SAFE,
+        PortRisk::Shielded => SHIELDED,
         PortRisk::Exposed => WARN,
         PortRisk::Critical => DANGER,
     }

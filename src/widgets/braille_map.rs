@@ -35,10 +35,16 @@ fn dot_mask(cx: usize, cy: usize) -> u8 {
     }
 }
 
-// ─── Coastline color ────────────────────────────────────────────────
+// ─── Coastline colors ───────────────────────────────────────────────
 
-const COASTLINE: Color = Color::Rgb(50, 80, 120);
-const GRID_COLOR: Color = Color::Rgb(15, 20, 35);
+/// Primary coastlines: major continental outlines — brighter blue
+const COASTLINE_PRIMARY: Color = Color::Rgb(60, 95, 140);
+/// Secondary coastlines: island detail, small features — subtler blue
+const COASTLINE_SECONDARY: Color = Color::Rgb(40, 70, 110);
+/// Latitude / longitude grid
+const GRID_COLOR: Color = Color::Rgb(18, 25, 42);
+/// Continent label text
+const LABEL_COLOR: Color = Color::Rgb(25, 35, 55);
 
 // ─── BrailleCanvas ──────────────────────────────────────────────────
 
@@ -53,6 +59,8 @@ pub struct BrailleCanvas {
     cells: Vec<Vec<u8>>,
     colors: Vec<Vec<Color>>,
     priority: Vec<Vec<u8>>,
+    /// Text overlay entries: (col, row, char, color, priority).
+    text_overlay: Vec<(usize, usize, char, Color, u8)>,
 }
 
 impl BrailleCanvas {
@@ -62,8 +70,9 @@ impl BrailleCanvas {
             width,
             height,
             cells: vec![vec![0u8; width]; height],
-            colors: vec![vec![COASTLINE; width]; height],
+            colors: vec![vec![COASTLINE_PRIMARY; width]; height],
             priority: vec![vec![0u8; width]; height],
+            text_overlay: Vec::new(),
         }
     }
 
@@ -169,21 +178,51 @@ impl BrailleCanvas {
         }
     }
 
+    /// Place a text label on the canvas. Text characters will replace
+    /// braille glyphs at the specified terminal cell positions.
+    pub fn place_text(&mut self, col: usize, row: usize, text: &str, color: Color, pri: u8) {
+        for (i, ch) in text.chars().enumerate() {
+            let c = col + i;
+            if c < self.width && row < self.height {
+                self.text_overlay.push((c, row, ch, color, pri));
+            }
+        }
+    }
+
     /// Render the canvas into ratatui `Line`s. Each cell becomes a braille
     /// character `U+2800 + mask`, styled with its foreground color over the
-    /// ocean background.
+    /// ocean background. Text overlays replace braille glyphs where present.
     pub fn render(&self) -> Vec<Line<'static>> {
+        // Build a lookup for text overlays
+        let mut text_map: std::collections::HashMap<(usize, usize), (char, Color)> =
+            std::collections::HashMap::new();
+        for &(c, r, ch, color, _pri) in &self.text_overlay {
+            if r < self.height && c < self.width {
+                // Only place label if the cell has no braille content (avoid overwriting coastlines)
+                if self.cells[r][c] == 0 {
+                    text_map.insert((c, r), (ch, color));
+                }
+            }
+        }
+
         let mut lines = Vec::with_capacity(self.height);
         for row in 0..self.height {
             let mut spans = Vec::with_capacity(self.width);
             for col in 0..self.width {
-                let mask = self.cells[row][col];
-                let ch = char::from_u32(0x2800 + mask as u32).unwrap_or(' ');
-                let fg = self.colors[row][col];
-                spans.push(Span::styled(
-                    ch.to_string(),
-                    Style::default().fg(fg).bg(theme::BG),
-                ));
+                if let Some(&(ch, color)) = text_map.get(&(col, row)) {
+                    spans.push(Span::styled(
+                        ch.to_string(),
+                        Style::default().fg(color).bg(theme::BG),
+                    ));
+                } else {
+                    let mask = self.cells[row][col];
+                    let ch = char::from_u32(0x2800 + mask as u32).unwrap_or(' ');
+                    let fg = self.colors[row][col];
+                    spans.push(Span::styled(
+                        ch.to_string(),
+                        Style::default().fg(fg).bg(theme::BG),
+                    ));
+                }
             }
             lines.push(Line::from(spans));
         }
@@ -216,6 +255,16 @@ fn project(lon: f64, lat: f64, px_w: usize, px_h: usize) -> (i32, i32) {
     let px = (mx * px_w as f64) as i32;
     let py = (((my - y_north) / (y_south - y_north)) * px_h as f64) as i32;
     (px, py)
+}
+
+/// Project (lon, lat) to terminal cell coordinates (col, row).
+fn project_cell(lon: f64, lat: f64, w: usize, h: usize) -> (usize, usize) {
+    let px_w = w * 2;
+    let px_h = h * 4;
+    let (px, py) = project(lon, lat, px_w, px_h);
+    let col = (px / 2).clamp(0, w as i32 - 1) as usize;
+    let row = (py / 4).clamp(0, h as i32 - 1) as usize;
+    (col, row)
 }
 
 // ─── IP Jitter ──────────────────────────────────────────────────────
@@ -301,18 +350,66 @@ pub fn country_center(iso2: &str) -> Option<(f64, f64)> {
 
 // ─── Coastline Data ─────────────────────────────────────────────────
 
+/// Parsed coastline data with primary (major) and secondary (detail) layers.
+struct CoastlineData {
+    primary: Vec<Vec<(f64, f64)>>,
+    secondary: Vec<Vec<(f64, f64)>>,
+}
+
 /// Load world coastlines from the embedded JSON asset file.
-/// Returns polylines of (lon, lat) pairs — ~1800+ points across 70+ polylines.
-fn world_coastlines() -> &'static Vec<Vec<(f64, f64)>> {
-    static COASTLINES: OnceLock<Vec<Vec<(f64, f64)>>> = OnceLock::new();
+/// Returns two layers: primary (major coastlines) and secondary (detail).
+/// Data sourced from Natural Earth 50m coastlines — ~60,000 real geographic points.
+fn world_coastlines() -> &'static CoastlineData {
+    static COASTLINES: OnceLock<CoastlineData> = OnceLock::new();
     COASTLINES.get_or_init(|| {
         let data = include_str!("../../assets/world.json");
+
+        // Try new layered format: {"primary": [...], "secondary": [...]}
+        if let Ok(layered) = serde_json::from_str::<serde_json::Value>(data) {
+            if layered.is_object() && layered.get("primary").is_some() {
+                let parse_layer = |val: &serde_json::Value| -> Vec<Vec<(f64, f64)>> {
+                    serde_json::from_value::<Vec<Vec<[f64; 2]>>>(val.clone())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|poly| poly.into_iter().map(|p| (p[0], p[1])).collect())
+                        .collect()
+                };
+                let primary = layered
+                    .get("primary")
+                    .map(|v| parse_layer(v))
+                    .unwrap_or_default();
+                let secondary = layered
+                    .get("secondary")
+                    .map(|v| parse_layer(v))
+                    .unwrap_or_default();
+                return CoastlineData { primary, secondary };
+            }
+        }
+
+        // Fallback: legacy flat array format
         let raw: Vec<Vec<[f64; 2]>> = serde_json::from_str(data).unwrap_or_default();
-        raw.into_iter()
+        let all: Vec<Vec<(f64, f64)>> = raw
+            .into_iter()
             .map(|poly| poly.into_iter().map(|p| (p[0], p[1])).collect())
-            .collect()
+            .collect();
+        CoastlineData {
+            primary: all,
+            secondary: Vec::new(),
+        }
     })
 }
+
+// ─── Continent Labels ───────────────────────────────────────────────
+
+/// Continent labels with approximate center coordinates (lon, lat).
+const CONTINENT_LABELS: &[(&str, f64, f64)] = &[
+    ("NA", -100.0, 45.0),
+    ("SA", -58.0, -15.0),
+    ("EU", 15.0, 52.0),
+    ("AF", 20.0, 5.0),
+    ("AS", 85.0, 42.0),
+    ("AU", 134.0, -25.0),
+];
 
 // ─── Color Helpers ──────────────────────────────────────────────────
 
@@ -351,10 +448,16 @@ fn draw_grid(canvas: &mut BrailleCanvas, px_w: usize, px_h: usize) {
             continue;
         }
         let (_, py) = project(0.0, lat, px_w, px_h);
-        // Draw dotted horizontal line (every 3rd pixel)
+        // Equator gets slightly brighter treatment
+        let color = if lat_deg == 0 {
+            Color::Rgb(22, 30, 50)
+        } else {
+            GRID_COLOR
+        };
+        // Draw dotted horizontal line
         let mut x = 0i32;
         while x < px_w as i32 {
-            canvas.set_dot_pri(x, py, GRID_COLOR, 0);
+            canvas.set_dot_pri(x, py, color, 0);
             x += 3;
         }
     }
@@ -364,11 +467,45 @@ fn draw_grid(canvas: &mut BrailleCanvas, px_w: usize, px_h: usize) {
         let lon = lon_deg as f64;
         let (px_top, py_top) = project(lon, LAT_NORTH, px_w, px_h);
         let (_, py_bot) = project(lon, LAT_SOUTH, px_w, px_h);
-        // Draw dotted vertical line (every 3rd pixel)
+        // Prime meridian gets slightly brighter
+        let color = if lon_deg == 0 {
+            Color::Rgb(22, 30, 50)
+        } else {
+            GRID_COLOR
+        };
         let mut y = py_top;
         while y < py_bot {
-            canvas.set_dot_pri(px_top, y, GRID_COLOR, 0);
+            canvas.set_dot_pri(px_top, y, color, 0);
             y += 3;
+        }
+    }
+}
+
+// ─── Coastline Drawing ─────────────────────────────────────────────
+
+/// Draw a set of polylines onto the canvas with the given color and priority.
+fn draw_coastline_layer(
+    canvas: &mut BrailleCanvas,
+    polylines: &[Vec<(f64, f64)>],
+    color: Color,
+    pri: u8,
+    px_w: usize,
+    px_h: usize,
+) {
+    for polyline in polylines.iter() {
+        if polyline.len() < 2 {
+            continue;
+        }
+        let mut prev = project(polyline[0].0, polyline[0].1, px_w, px_h);
+        for &(lon, lat) in &polyline[1..] {
+            let cur = project(lon, lat, px_w, px_h);
+            // Skip wrap-around artifacts: if projected distance is too large
+            let dx = (cur.0 - prev.0).abs() as f64;
+            let dy = (cur.1 - prev.1).abs() as f64;
+            if dx / (px_w as f64) < 0.4 && dy / (px_h as f64) < 0.4 {
+                canvas.draw_line_pri(prev.0, prev.1, cur.0, cur.1, color, pri);
+            }
+            prev = cur;
         }
     }
 }
@@ -413,23 +550,36 @@ pub fn draw_world_map(
     // ── Draw grid (lowest priority) ─────────────────────────────
     draw_grid(&mut canvas, px_w, px_h);
 
-    // ── Draw coastlines ─────────────────────────────────────────
+    // ── Draw coastlines — two layers ────────────────────────────
     let coastlines = world_coastlines();
-    for polyline in coastlines.iter() {
-        if polyline.len() < 2 {
-            continue;
-        }
-        let mut prev = project(polyline[0].0, polyline[0].1, px_w, px_h);
-        for &(lon, lat) in &polyline[1..] {
-            let cur = project(lon, lat, px_w, px_h);
-            // Skip wrap-around artifacts: if projected distance is too large
-            let dx = (cur.0 - prev.0).abs() as f64;
-            let dy = (cur.1 - prev.1).abs() as f64;
-            if dx / (px_w as f64) < 0.4 && dy / (px_h as f64) < 0.4 {
-                canvas.draw_line_pri(prev.0, prev.1, cur.0, cur.1, COASTLINE, 1);
-            }
-            prev = cur;
-        }
+
+    // Secondary layer first (lower priority, dimmer)
+    draw_coastline_layer(
+        &mut canvas,
+        &coastlines.secondary,
+        COASTLINE_SECONDARY,
+        1,
+        px_w,
+        px_h,
+    );
+
+    // Primary layer on top (higher priority, brighter)
+    draw_coastline_layer(
+        &mut canvas,
+        &coastlines.primary,
+        COASTLINE_PRIMARY,
+        1,
+        px_w,
+        px_h,
+    );
+
+    // ── Continent labels ────────────────────────────────────────
+    for &(label, lon, lat) in CONTINENT_LABELS {
+        let (col, row) = project_cell(lon, lat, w, h);
+        // Center the label approximately
+        let offset = label.len() / 2;
+        let col = col.saturating_sub(offset);
+        canvas.place_text(col, row, label, LABEL_COLOR, 0);
     }
 
     // ── Draw dots ───────────────────────────────────────────────

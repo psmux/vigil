@@ -384,6 +384,7 @@ impl App {
                     port.bind_addr,
                     &port.process_name,
                     &self.firewall_rules,
+                    self.firewall_default_deny,
                 );
                 port.auth = data::ports::detect_auth(port.port, &port.process_name);
             }

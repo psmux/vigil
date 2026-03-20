@@ -10,7 +10,7 @@ use crate::theme;
 /// Draw the bottom status bar with key hints.
 ///
 /// ```text
-/// q:Quit  1-6:View  Tab:Next  j/k:Scroll  z:Pause  ?:Help
+/// q:Quit  1-7:View  Tab:Next  j/k:Scroll  z:Pause  ?:Help
 /// ```
 ///
 /// Key names are in `GOLD` bold; descriptions in `TEXT_DIM`.

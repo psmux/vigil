@@ -270,6 +270,7 @@ fn draw_doors_strip(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let safe_count = app.ports.iter().filter(|p| p.risk == PortRisk::Safe).count();
+    let shielded_count = app.ports.iter().filter(|p| p.risk == PortRisk::Shielded).count();
     let exposed_count = app.ports.iter().filter(|p| p.risk == PortRisk::Exposed).count();
     let critical_count = app.ports.iter().filter(|p| p.risk == PortRisk::Critical).count();
 
@@ -281,18 +282,14 @@ fn draw_doors_strip(f: &mut Frame, app: &App, area: Rect) {
 
     // Render each port as a colored dot
     for port in &app.ports {
-        let (dot_color, dot_char) = match port.risk {
-            PortRisk::Safe => (theme::SAFE, "\u{25CF}"),        // ●
-            PortRisk::Exposed => (theme::WARN, "\u{25CF}"),
-            PortRisk::Critical => (theme::DANGER, "\u{25CF}"),
-        };
+        let dot_color = theme::risk_color(port.risk);
         spans.push(Span::styled(
-            format!("{}{} ", dot_char, port.port),
+            format!("\u{25CF}{} ", port.port),
             Style::default().fg(dot_color),
         ));
     }
 
-    // Summary counts
+        // Summary counts
     spans.push(Span::styled(
         " \u{2500}\u{2500} ",
         Style::default().fg(theme::SEPARATOR),
@@ -300,6 +297,11 @@ fn draw_doors_strip(f: &mut Frame, app: &App, area: Rect) {
     spans.push(Span::styled(
         format!("{} safe", safe_count),
         Style::default().fg(theme::SAFE),
+    ));
+    spans.push(Span::styled(" ", Style::default()));
+    spans.push(Span::styled(
+        format!("{} shielded", shielded_count),
+        Style::default().fg(theme::SHIELDED),
     ));
     spans.push(Span::styled(" ", Style::default()));
     spans.push(Span::styled(

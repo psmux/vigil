@@ -45,11 +45,13 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_port_donut(f: &mut Frame, app: &App, area: Rect) {
     let safe = app.ports.iter().filter(|p| p.risk == PortRisk::Safe).count() as u32;
+    let shielded = app.ports.iter().filter(|p| p.risk == PortRisk::Shielded).count() as u32;
     let exposed = app.ports.iter().filter(|p| p.risk == PortRisk::Exposed).count() as u32;
     let critical = app.ports.iter().filter(|p| p.risk == PortRisk::Critical).count() as u32;
 
     let segments = vec![
         DonutSegment { label: "Safe".into(), value: safe, color: theme::SAFE },
+        DonutSegment { label: "Shielded".into(), value: shielded, color: theme::SHIELDED },
         DonutSegment { label: "Exposed".into(), value: exposed, color: theme::WARN },
         DonutSegment { label: "Critical".into(), value: critical, color: theme::DANGER },
     ];

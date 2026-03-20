@@ -90,6 +90,7 @@ pub fn draw_port_flow(
     // Risk badge with background color
     let (risk_fg, risk_bg) = match risk {
         PortRisk::Safe => (theme::BG, theme::SAFE),
+        PortRisk::Shielded => (theme::BG, theme::SHIELDED),
         PortRisk::Exposed => (theme::BG, theme::WARN),
         PortRisk::Critical => (Color::Rgb(255, 255, 255), theme::DANGER),
     };

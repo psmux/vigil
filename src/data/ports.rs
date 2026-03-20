@@ -48,7 +48,7 @@ pub fn collect_listening_ports(connections: &[Connection]) -> Vec<ListeningPort>
             .clone()
             .unwrap_or_else(|| "<unknown>".to_string());
 
-        let risk = classify_risk(port, bind_addr, &process, &[]);
+        let risk = classify_risk(port, bind_addr, &process, &[], false);
         let auth = detect_auth(port, &process);
         let conn_count = conn_counts.get(&port).copied().unwrap_or(0);
 
@@ -73,38 +73,51 @@ pub fn collect_listening_ports(connections: &[Connection]) -> Vec<ListeningPort>
 
 /// Classify the risk level of a listening port.
 ///
-/// - **Critical**: dangerous service bound to all interfaces (0.0.0.0 / ::)
-///   with no authentication — exposed to the internet with no protection.
-/// - **Exposed**: bound to all interfaces (0.0.0.0 / ::) — reachable from
-///   any network if the firewall has a hole. A firewall ALLOW rule does NOT
-///   make a wildcard-bound port safe; it just means it is intentionally open.
+/// - **Critical**: dangerous service bound to all interfaces with a firewall ALLOW rule.
+/// - **Exposed**: bound to all interfaces (0.0.0.0 / ::) with a firewall ALLOW rule --
+///   actually reachable from the internet.
+/// - **Shielded**: bound to all interfaces but no firewall ALLOW rule and default deny
+///   is active -- the firewall blocks external access even though the port listens broadly.
 /// - **Safe**: bound to localhost only (127.0.0.1 / ::1).
 pub fn classify_risk(
-    _port: u16,
+    port: u16,
     bind_addr: IpAddr,
     process: &str,
-    _firewall_rules: &[FirewallRule],
+    firewall_rules: &[FirewallRule],
+    default_deny: bool,
 ) -> PortRisk {
-    let is_wildcard = match bind_addr {
-        IpAddr::V4(v4) => v4.is_unspecified(),
-        IpAddr::V6(v6) => v6.is_unspecified(),
-    };
+    // Localhost = always safe
+    if bind_addr.is_loopback() {
+        return PortRisk::Safe;
+    }
 
-    // Bound to localhost only (127.0.0.1 or ::1) -> safe
+    // Check if wildcard (0.0.0.0 or ::)
+    let is_wildcard = bind_addr.is_unspecified();
     if !is_wildcard {
         return PortRisk::Safe;
     }
 
-    // Wildcard-bound dangerous service (redis, mongo, memcached, etc.)
-    // with no authentication -> critical exposure
-    if is_dangerous_service(process) {
+    // Wildcard -- check if firewall allows this port
+    let has_allow_rule = firewall_rules.iter().any(|r| {
+        r.action == FirewallAction::Allow && r.port == Some(port)
+    });
+
+    // Dangerous service on wildcard with allow rule
+    if is_dangerous_service(process) && has_allow_rule {
         return PortRisk::Critical;
     }
 
-    // Any port bound to 0.0.0.0 / :: is exposed to the network.
-    // A firewall ALLOW rule does not change this -- the port is still
-    // reachable from any interface and a firewall misconfiguration or
-    // reset would leave it wide open.
+    // Wildcard with allow rule = actually reachable
+    if has_allow_rule {
+        return PortRisk::Exposed;
+    }
+
+    // Wildcard but no allow rule and default deny = firewall is blocking it
+    if default_deny {
+        return PortRisk::Shielded;
+    }
+
+    // Wildcard, no deny default = exposed (no firewall protection)
     PortRisk::Exposed
 }
 
@@ -190,15 +203,15 @@ mod tests {
     #[test]
     fn test_classify_risk_localhost() {
         let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
-        assert_eq!(classify_risk(6379, addr, "redis-server", &[]), PortRisk::Safe);
+        assert_eq!(classify_risk(6379, addr, "redis-server", &[], false), PortRisk::Safe);
     }
 
     #[test]
     fn test_classify_risk_exposed_redis() {
         let addr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
         assert_eq!(
-            classify_risk(6379, addr, "redis-server", &[]),
-            PortRisk::Critical
+            classify_risk(6379, addr, "redis-server", &[], false),
+            PortRisk::Exposed
         );
     }
 
@@ -229,7 +242,7 @@ mod tests {
             hits: 0,
         }];
         assert_eq!(
-            classify_risk(3000, addr, "node", &rules),
+            classify_risk(3000, addr, "node", &rules, false),
             PortRisk::Exposed
         );
     }
@@ -249,7 +262,7 @@ mod tests {
             hits: 0,
         }];
         assert_eq!(
-            classify_risk(6379, addr, "redis-server", &rules),
+            classify_risk(6379, addr, "redis-server", &rules, false),
             PortRisk::Critical
         );
     }
@@ -258,7 +271,7 @@ mod tests {
     fn test_wildcard_normal_service_no_rules_exposed() {
         let addr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
         assert_eq!(
-            classify_risk(3000, addr, "node", &[]),
+            classify_risk(3000, addr, "node", &[], false),
             PortRisk::Exposed
         );
     }

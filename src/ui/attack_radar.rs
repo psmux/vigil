@@ -8,6 +8,7 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::data::AttackType;
+use crate::data::alerts::AlertSeverity;
 use crate::format::{format_count, format_time_ago};
 use crate::theme;
 use crate::widgets::bar_chart::{self, BarItem};
@@ -26,9 +27,10 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7),   // heatmap
-            Constraint::Percentage(50), // middle row
-            Constraint::Min(5),      // attacker table
+            Constraint::Length(7),       // heatmap
+            Constraint::Percentage(40),  // middle row
+            Constraint::Min(5),          // attacker table
+            Constraint::Length(8),       // recent alerts
         ])
         .split(area);
 
@@ -58,6 +60,9 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 
     // ── Attacker table ───────────────────────────────────────────
     draw_attacker_table(f, app, chunks[2]);
+
+    // ── Recent alerts ────────────────────────────────────────────
+    draw_recent_alerts(f, app, chunks[3]);
 }
 
 fn draw_attack_type_bars(f: &mut Frame, app: &App, area: Rect) {
@@ -217,6 +222,89 @@ fn draw_attacker_table(f: &mut Frame, app: &App, area: Rect) {
             ),
             Span::styled(status_str.to_string(), Style::default().fg(status_color)),
             Span::styled(time_str, Style::default().fg(theme::TEXT_DIM)),
+        ]));
+    }
+
+    let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::BG));
+    f.render_widget(paragraph, inner);
+}
+
+fn draw_recent_alerts(f: &mut Frame, app: &App, area: Rect) {
+    let unread = app.alert_engine.unread_count();
+    let title_text = if unread > 0 {
+        format!(" Recent Alerts ({} unread) ", unread)
+    } else {
+        " Recent Alerts ".to_string()
+    };
+
+    let title_color = if unread > 0 { theme::GOLD } else { theme::TITLE };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
+        .title(Span::styled(
+            title_text,
+            Style::default().fg(title_color).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(theme::BG));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.width < 30 || inner.height == 0 {
+        return;
+    }
+
+    let recent = app.alert_engine.recent(inner.height as usize);
+
+    if recent.is_empty() {
+        let line = Line::from(Span::styled(
+            " No alerts yet",
+            Style::default().fg(theme::TEXT_DIM),
+        ));
+        let paragraph = Paragraph::new(line).style(Style::default().bg(theme::BG));
+        f.render_widget(paragraph, inner);
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    for alert in &recent {
+        // Severity badge
+        let (sev_label, sev_color) = match alert.severity {
+            AlertSeverity::Crit => ("CRIT", theme::DANGER),
+            AlertSeverity::Warn => ("WARN", theme::GOLD),
+            AlertSeverity::Info => ("INFO", theme::BLUE),
+        };
+
+        // Timestamp HH:MM:SS
+        let time_str = alert.timestamp.format("%H:%M:%S").to_string();
+
+        // Unread indicator
+        let read_indicator = if alert.read { " " } else { "\u{25CF}" };
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {} ", read_indicator),
+                Style::default().fg(if alert.read { theme::TEXT_MUTED } else { sev_color }),
+            ),
+            Span::styled(
+                format!("{:<4}", sev_label),
+                Style::default()
+                    .fg(theme::BG)
+                    .bg(sev_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                time_str,
+                Style::default().fg(theme::TEXT_DIM),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                alert.message.clone(),
+                Style::default().fg(if alert.read { theme::TEXT_DIM } else { theme::TEXT }),
+            ),
         ]));
     }
 

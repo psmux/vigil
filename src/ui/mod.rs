@@ -43,4 +43,41 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     status_bar::draw(f, app, chunks[3]);
+
+    if app.show_help {
+        draw_help_overlay(f, area);
+    }
+}
+
+fn draw_help_overlay(f: &mut Frame, area: ratatui::layout::Rect) {
+    use ratatui::widgets::{Block, Borders, BorderType, Clear, Paragraph};
+    use ratatui::style::{Color, Style, Modifier};
+    use ratatui::text::{Line, Span};
+    let w = 44u16.min(area.width.saturating_sub(4));
+    let h = 14u16.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(w)) / 2;
+    let y = (area.height.saturating_sub(h)) / 2;
+    let popup = ratatui::layout::Rect::new(x, y, w, h);
+    f.render_widget(Clear, popup);
+    let gold = Style::default().fg(Color::Rgb(255,200,80)).add_modifier(Modifier::BOLD);
+    let text = Style::default().fg(Color::Rgb(180,190,210));
+    let dim = Style::default().fg(Color::Rgb(80,90,110));
+    let lines = vec![
+        Line::from(vec![Span::styled("  1-7   ", gold), Span::styled("Switch views", text)]),
+        Line::from(vec![Span::styled("  Tab   ", gold), Span::styled("Next view", text)]),
+        Line::from(vec![Span::styled("  j/k   ", gold), Span::styled("Scroll up/down", text)]),
+        Line::from(vec![Span::styled("  z     ", gold), Span::styled("Pause/resume", text)]),
+        Line::from(vec![Span::styled("  a     ", gold), Span::styled("Mark alerts read", text)]),
+        Line::from(vec![Span::styled("  ?     ", gold), Span::styled("Toggle help", text)]),
+        Line::from(vec![Span::styled("  q     ", gold), Span::styled("Quit", text)]),
+        Line::from(""),
+        Line::from(Span::styled("  Press ? or Esc to close", dim)),
+    ];
+    let block = Block::default()
+        .title(Span::styled(" VIGIL Help ", Style::default().fg(Color::Rgb(160,180,220)).add_modifier(Modifier::BOLD)))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Rgb(60,140,255)))
+        .style(Style::default().bg(Color::Rgb(12,18,35)));
+    f.render_widget(Paragraph::new(lines).block(block), popup);
 }

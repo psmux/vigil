@@ -190,5 +190,5 @@ fn draw_city_bars(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    draw_bar_chart(f, area, "Connections by City", &items, 8);
+    draw_bar_chart(f, area, "Connections by Region", &items, 8);
 }
