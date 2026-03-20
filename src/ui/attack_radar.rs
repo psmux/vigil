@@ -92,12 +92,12 @@ fn draw_attack_type_bars(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_origins_map(f: &mut Frame, app: &App, area: Rect) {
-    // Build dots from attacks only (all red, pulsing)
+    // Build dots from the aggregated attacker list (deduplicated, one dot per IP)
     let mut dots: Vec<MapDot> = Vec::new();
 
-    for attack in &app.attacks {
-        if let Some(geo) = app.geoip_cache.get(&attack.source_ip) {
-            let seed = match attack.source_ip {
+    for agg in &app.attackers_sorted {
+        if let Some(geo) = app.geoip_cache.get(&agg.source_ip) {
+            let seed = match agg.source_ip {
                 std::net::IpAddr::V4(v4) => u32::from(v4),
                 std::net::IpAddr::V6(v6) => {
                     let seg = v6.segments();
@@ -135,25 +135,11 @@ fn draw_attacker_table(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Aggregate attacks by source IP
-    let mut ip_agg: HashMap<std::net::IpAddr, (u64, Option<chrono::DateTime<chrono::Utc>>)> = HashMap::new();
-    for attack in &app.attacks {
-        let entry = ip_agg.entry(attack.source_ip).or_insert((0, None));
-        entry.0 += attack.count as u64;
-        match entry.1 {
-            None => entry.1 = Some(attack.timestamp),
-            Some(prev) if attack.timestamp > prev => entry.1 = Some(attack.timestamp),
-            _ => {}
-        }
-    }
+    // Use the pre-sorted, pre-aggregated attacker list from app state.
+    // No re-aggregation or re-sorting per frame — stable ordering guaranteed.
+    let sorted = &app.attackers_sorted;
 
-    let mut sorted: Vec<(std::net::IpAddr, u64, Option<chrono::DateTime<chrono::Utc>>)> = ip_agg
-        .into_iter()
-        .map(|(ip, (count, ts))| (ip, count, ts))
-        .collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
-
-    let max_count = sorted.first().map(|s| s.1).unwrap_or(1).max(1);
+    let max_count = sorted.first().map(|s| s.total_attempts).unwrap_or(1).max(1);
 
     // Header
     let header = Line::from(vec![
@@ -192,36 +178,33 @@ fn draw_attacker_table(f: &mut Frame, app: &App, area: Rect) {
     let visible_rows = (inner.height as usize).saturating_sub(1); // minus header
     let skip = app.scroll_offset.min(sorted.len().saturating_sub(visible_rows));
 
-    for (ip, count, last_seen) in sorted.iter().skip(skip).take(visible_rows) {
-        let ip_str = format!("{:<18}", ip);
+    for agg in sorted.iter().skip(skip).take(visible_rows) {
+        let ip_str = format!("{:<18}", agg.source_ip);
 
         // Country code from geoip cache
-        let cc = app.geoip_cache.get(ip)
+        let cc = app.geoip_cache.get(&agg.source_ip)
             .map(|g| g.country_code.clone())
             .unwrap_or_else(|| "--".into());
         let cc_str = format!("{:<6}", cc);
 
-        let count_str = format!("{:>8}", format_count(*count));
+        let count_str = format!("{:>8}", format_count(agg.total_attempts));
 
         // Intensity bar using block characters
-        let intensity = (*count as f64 / max_count as f64).clamp(0.0, 1.0);
+        let intensity = (agg.total_attempts as f64 / max_count as f64).clamp(0.0, 1.0);
         let bar_width: usize = 10;
         let filled = (intensity * bar_width as f64).round() as usize;
         let bar: String = "\u{2588}".repeat(filled)
             + &"\u{2591}".repeat(bar_width.saturating_sub(filled));
 
-        // Status: BANNED or ACTIVE
-        let is_banned = app.banned_ips.contains(ip);
-        let (status_str, status_color) = if is_banned {
+        // Status: BANNED or ACTIVE (read from pre-computed field)
+        let (status_str, status_color) = if agg.banned {
             ("BANNED  ", theme::SAFE)
         } else {
             ("ACTIVE  ", theme::DANGER)
         };
 
         // Time ago
-        let time_str = last_seen
-            .map(|ts| format_time_ago(ts))
-            .unwrap_or_else(|| "--".into());
+        let time_str = format_time_ago(agg.last_seen);
 
         lines.push(Line::from(vec![
             Span::styled(ip_str, Style::default().fg(theme::TEXT)),

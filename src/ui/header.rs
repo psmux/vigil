@@ -18,7 +18,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let time_str = now.format("%H:%M:%S UTC").to_string();
 
     let conn_count = app.connections.len();
-    let threat_count = app.attacks.len();
+    let threat_count = app.attackers_sorted.len();
 
     let sep = Span::styled(
         " \u{2500}\u{2500} ", // ──

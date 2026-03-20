@@ -58,7 +58,7 @@ fn try_query_fail2ban() -> Option<HashSet<IpAddr>> {
     for line in text.lines() {
         let line = line.trim();
         // Look for the "Banned IP list:" line
-        if let Some(rest) = line.strip_prefix("|- Banned IP list:") {
+        if let Some(rest) = line.strip_prefix("|- Banned IP list:").or_else(|| line.strip_prefix("`- Banned IP list:")) {
             let rest = rest.trim();
             for token in rest.split_whitespace() {
                 if let Ok(ip) = token.parse::<IpAddr>() {

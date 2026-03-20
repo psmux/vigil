@@ -83,20 +83,22 @@ impl Default for SystemCollector {
 /// Returns a ServiceStatus for each of the well-known services.
 /// On non-Linux, all services report as inactive.
 pub fn collect_services() -> Vec<ServiceStatus> {
-    const SERVICES: &[&str] = &[
-        "postgresql",
-        "sshd",
-        "cloudflared",
-        "caddy",
-        "fail2ban",
-        "nginx",
+    // (display_name, systemd_unit_candidates)
+    // SSH is "ssh" on Debian/Ubuntu, "sshd" on RHEL/Fedora/Arch.
+    const SERVICES: &[(&str, &[&str])] = &[
+        ("postgresql", &["postgresql"]),
+        ("ssh", &["ssh", "sshd"]),
+        ("cloudflared", &["cloudflared"]),
+        ("caddy", &["caddy"]),
+        ("fail2ban", &["fail2ban"]),
+        ("nginx", &["nginx"]),
     ];
 
     SERVICES
         .iter()
-        .map(|&name| ServiceStatus {
-            name: name.to_string(),
-            active: is_service_active(name),
+        .map(|&(display_name, candidates)| ServiceStatus {
+            name: display_name.to_string(),
+            active: candidates.iter().any(|&c| is_service_active(c)),
         })
         .collect()
 }
@@ -153,11 +155,12 @@ fn collect_interfaces_linux() -> Vec<NetworkInterface> {
         let name = entry.file_name().to_string_lossy().to_string();
         let iface_path = entry.path();
 
-        // Read operstate: "up" or "down"
+        // Read operstate: "up", "down", or "unknown" (loopback uses "unknown")
         let operstate_path = iface_path.join("operstate");
-        let up = fs::read_to_string(&operstate_path)
-            .map(|s| s.trim() == "up")
-            .unwrap_or(false);
+        let operstate = fs::read_to_string(&operstate_path).unwrap_or_default();
+        let state = operstate.trim();
+        // "unknown" is returned by loopback (lo) — treat it as up
+        let up = state == "up" || state == "unknown";
 
         // Read speed (Mbps) — may fail for virtual interfaces
         let speed_path = iface_path.join("speed");

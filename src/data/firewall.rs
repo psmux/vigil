@@ -85,10 +85,19 @@ fn try_parse_ufw() -> Option<(Vec<FirewallRule>, bool, bool)> {
 /// Parse a single ufw rule line.
 #[cfg(target_os = "linux")]
 fn parse_ufw_rule_line(line: &str, index: usize) -> Option<FirewallRule> {
-    let parts: Vec<&str> = line.split_whitespace().collect();
+    // Strip "(v6)" from IPv6 rules so the parser sees the same format as IPv4
+    let cleaned = line.replace("(v6)", "").replace("  ", " ");
+    let parts: Vec<&str> = cleaned.split_whitespace().collect();
     if parts.len() < 3 {
         return None;
     }
+
+    // Extract comment after "#" if present
+    let comment = if let Some(hash_pos) = cleaned.find('#') {
+        cleaned[hash_pos + 1..].trim().to_string()
+    } else {
+        String::new()
+    };
 
     // parts[0] = port/proto (e.g. "22/tcp", "80,443/tcp", "Anywhere")
     // parts[1] = action (ALLOW, DENY, REJECT)
@@ -128,9 +137,13 @@ fn parse_ufw_rule_line(line: &str, index: usize) -> Option<FirewallRule> {
         (None, None)
     };
 
-    // Source: everything after the direction keyword
+    // Source: everything after the direction keyword, excluding comment
     let source = if parts.len() > 3 {
-        Some(parts[3..].join(" "))
+        let source_parts: Vec<&str> = parts[3..].iter()
+            .take_while(|p| !p.starts_with("#"))
+            .copied()
+            .collect();
+        if source_parts.is_empty() { None } else { Some(source_parts.join(" ")) }
     } else {
         None
     };
@@ -142,7 +155,7 @@ fn parse_ufw_rule_line(line: &str, index: usize) -> Option<FirewallRule> {
         port,
         protocol,
         source,
-        comment: String::new(),
+        comment,
         hits: 0,
     })
 }

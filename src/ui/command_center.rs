@@ -59,7 +59,7 @@ fn draw_top_row(f: &mut Frame, app: &App, area: Rect) {
     // Score gauge
     gauge::draw_score_gauge(f, cols[0], app.security_score, app.score_delta_1h);
 
-    // Attack map — build dots from connections + attacks
+    // Attack map — build dots from connections + aggregated attackers
     let mut dots: Vec<MapDot> = Vec::new();
 
     // Connection dots: green for normal, red for threats
@@ -88,10 +88,10 @@ fn draw_top_row(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // Attack dots: all red, pulsing
-    for attack in &app.attacks {
-        if let Some(geo) = app.geoip_cache.get(&attack.source_ip) {
-            let seed = match attack.source_ip {
+    // Attack dots: one per unique attacker IP (from aggregated list), all red, pulsing
+    for agg in &app.attackers_sorted {
+        if let Some(geo) = app.geoip_cache.get(&agg.source_ip) {
+            let seed = match agg.source_ip {
                 std::net::IpAddr::V4(v4) => u32::from(v4),
                 std::net::IpAddr::V6(v6) => {
                     let seg = v6.segments();

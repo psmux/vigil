@@ -16,6 +16,7 @@ impl BandwidthTracker {
         // Take an initial sample so the first call to sample() has a baseline
         let mut prev_stats = HashMap::new();
         for (iface, rx, tx) in procfs::parse_proc_net_dev() {
+        if iface == "lo" { continue; }
             prev_stats.insert(iface, (rx, tx));
         }
 
@@ -47,6 +48,7 @@ impl BandwidthTracker {
 
         for (iface, rx, tx) in &current {
             new_stats.insert(iface.clone(), (*rx, *tx));
+            if iface == "lo" { continue; }
 
             if let Some(&(prev_rx, prev_tx)) = self.prev_stats.get(iface) {
                 // Handle counter wraps (unlikely but possible)
@@ -60,8 +62,8 @@ impl BandwidthTracker {
         self.prev_stats = new_stats;
         self.prev_time = now;
 
-        let rx_bps = (total_rx_delta as f64 * 8.0) / elapsed; // bits per second
-        let tx_bps = (total_tx_delta as f64 * 8.0) / elapsed;
+        let rx_bps = (total_rx_delta as f64) / elapsed; // bits per second
+        let tx_bps = (total_tx_delta as f64) / elapsed;
 
         (rx_bps, tx_bps)
     }

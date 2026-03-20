@@ -86,6 +86,41 @@ fn tail_journalctl(tx: &mpsc::Sender<DataUpdate>) -> Result<(), ()> {
     Err(())
 }
 
+/// Try to extract a timestamp from the log line.
+///
+/// Supports two formats:
+/// 1. ISO 8601: "2026-03-20T14:51:57.937254+00:00 hostname sshd..."
+/// 2. Traditional syslog: "Mar 15 10:23:01 hostname sshd..."
+///
+/// Falls back to Utc::now() if neither format is found.
+fn parse_timestamp(line: &str) -> chrono::DateTime<Utc> {
+    // Try ISO 8601 first — the line starts with a timestamp like
+    // "2026-03-20T14:51:57.937254+00:00"
+    if line.len() > 25 {
+        let candidate = line.split_whitespace().next().unwrap_or("");
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(candidate) {
+            return dt.with_timezone(&Utc);
+        }
+        // Some systems emit without the colon in the offset, e.g. +0000
+        if let Ok(dt) = chrono::DateTime::parse_from_str(candidate, "%Y-%m-%dT%H:%M:%S%.f%z") {
+            return dt.with_timezone(&Utc);
+        }
+    }
+
+    // Try traditional syslog format: "Mar 15 10:23:01"
+    // These don't include year, so we use the current year.
+    if line.len() > 15 {
+        let prefix = &line[..15];
+        let year = Utc::now().format("%Y").to_string();
+        let with_year = format!("{} {}", prefix, year);
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(&with_year, "%b %e %H:%M:%S %Y") {
+            return naive.and_utc();
+        }
+    }
+
+    Utc::now()
+}
+
 /// Parse a single auth.log / journalctl line for attack indicators.
 ///
 /// Patterns detected:
@@ -144,8 +179,10 @@ fn parse_auth_line(line: &str) -> Option<AttackEvent> {
 
     let source_ip: IpAddr = ip.parse().ok()?;
 
+    let timestamp = parse_timestamp(line);
+
     Some(AttackEvent {
-        timestamp: Utc::now(),
+        timestamp,
         source_ip,
         attack_type,
         target_port: Some(22),
@@ -197,5 +234,26 @@ mod tests {
     fn test_parse_unrelated_line() {
         let line = "Mar 15 10:23:03 server kernel: something else entirely";
         assert!(parse_auth_line(line).is_none());
+    }
+
+    #[test]
+    fn test_parse_iso8601_timestamp() {
+        let line = "2026-03-20T14:51:57.937254+00:00 vigil sshd[1234]: Failed password for root from 203.0.113.5 port 22 ssh2";
+        let event = parse_auth_line(line).unwrap();
+        assert_eq!(event.attack_type, AttackType::SshBrute);
+        assert_eq!(event.source_ip, "203.0.113.5".parse::<IpAddr>().unwrap());
+        // Verify the timestamp was parsed from the line, not defaulting to now
+        assert_eq!(event.timestamp.format("%Y-%m-%d").to_string(), "2026-03-20");
+        assert_eq!(event.timestamp.format("%H:%M:%S").to_string(), "14:51:57");
+    }
+
+    #[test]
+    fn test_parse_iso8601_invalid_user() {
+        let line = "2026-03-20T15:00:00.000000+00:00 vigil sshd[5678]: Invalid user admin from 198.51.100.10 port 54321";
+        let event = parse_auth_line(line).unwrap();
+        assert_eq!(event.attack_type, AttackType::SshBrute);
+        assert_eq!(event.source_ip, "198.51.100.10".parse::<IpAddr>().unwrap());
+        assert_eq!(event.username.as_deref(), Some("admin"));
+        assert_eq!(event.timestamp.format("%Y-%m-%d").to_string(), "2026-03-20");
     }
 }

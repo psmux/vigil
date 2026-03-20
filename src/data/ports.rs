@@ -73,37 +73,39 @@ pub fn collect_listening_ports(connections: &[Connection]) -> Vec<ListeningPort>
 
 /// Classify the risk level of a listening port.
 ///
-/// - **Critical**: dangerous service exposed on 0.0.0.0 with no firewall rule
-/// - **Exposed**: bound to 0.0.0.0 (all interfaces)
-/// - **Safe**: bound to 127.0.0.1, or has an explicit firewall rule
+/// - **Critical**: dangerous service bound to all interfaces (0.0.0.0 / ::)
+///   with no authentication — exposed to the internet with no protection.
+/// - **Exposed**: bound to all interfaces (0.0.0.0 / ::) — reachable from
+///   any network if the firewall has a hole. A firewall ALLOW rule does NOT
+///   make a wildcard-bound port safe; it just means it is intentionally open.
+/// - **Safe**: bound to localhost only (127.0.0.1 / ::1).
 pub fn classify_risk(
-    port: u16,
+    _port: u16,
     bind_addr: IpAddr,
     process: &str,
-    firewall_rules: &[FirewallRule],
+    _firewall_rules: &[FirewallRule],
 ) -> PortRisk {
     let is_wildcard = match bind_addr {
         IpAddr::V4(v4) => v4.is_unspecified(),
         IpAddr::V6(v6) => v6.is_unspecified(),
     };
 
-    // Bound to localhost only → safe
+    // Bound to localhost only (127.0.0.1 or ::1) -> safe
     if !is_wildcard {
         return PortRisk::Safe;
     }
 
-    // Check if there's an explicit firewall rule for this port
-    let has_rule = firewall_rules.iter().any(|r| r.port == Some(port));
-
-    if is_dangerous_service(process) && !has_rule {
+    // Wildcard-bound dangerous service (redis, mongo, memcached, etc.)
+    // with no authentication -> critical exposure
+    if is_dangerous_service(process) {
         return PortRisk::Critical;
     }
 
-    if is_wildcard && !has_rule {
-        return PortRisk::Exposed;
-    }
-
-    PortRisk::Safe
+    // Any port bound to 0.0.0.0 / :: is exposed to the network.
+    // A firewall ALLOW rule does not change this -- the port is still
+    // reachable from any interface and a firewall misconfiguration or
+    // reset would leave it wide open.
+    PortRisk::Exposed
 }
 
 /// Heuristic auth detection based on port number and process name.
@@ -210,5 +212,54 @@ mod tests {
         assert!(is_dangerous_service("redis-server"));
         assert!(is_dangerous_service("mongod"));
         assert!(!is_dangerous_service("nginx"));
+    }
+
+    #[test]
+    fn test_wildcard_port_with_firewall_rule_still_exposed() {
+        // Regression: a firewall ALLOW rule should NOT make a wildcard port safe
+        let addr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let rules = vec![FirewallRule {
+            index: 0,
+            action: FirewallAction::Allow,
+            direction: FirewallDirection::In,
+            port: Some(3000),
+            protocol: Some(Protocol::Tcp),
+            source: None,
+            comment: String::new(),
+            hits: 0,
+        }];
+        assert_eq!(
+            classify_risk(3000, addr, "node", &rules),
+            PortRisk::Exposed
+        );
+    }
+
+    #[test]
+    fn test_dangerous_service_with_firewall_rule_still_critical() {
+        // Redis on 0.0.0.0 is critical even with a firewall rule
+        let addr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let rules = vec![FirewallRule {
+            index: 0,
+            action: FirewallAction::Allow,
+            direction: FirewallDirection::In,
+            port: Some(6379),
+            protocol: Some(Protocol::Tcp),
+            source: None,
+            comment: String::new(),
+            hits: 0,
+        }];
+        assert_eq!(
+            classify_risk(6379, addr, "redis-server", &rules),
+            PortRisk::Critical
+        );
+    }
+
+    #[test]
+    fn test_wildcard_normal_service_no_rules_exposed() {
+        let addr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        assert_eq!(
+            classify_risk(3000, addr, "node", &[]),
+            PortRisk::Exposed
+        );
     }
 }

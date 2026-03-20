@@ -14,19 +14,19 @@ use crate::data::threat;
 /// 4. Construct enriched Connection structs
 pub fn collect_connections() -> Vec<Connection> {
     // Gather raw sockets from all four files
-    let mut raw_sockets: Vec<(procfs::RawSocket, Protocol)> = Vec::new();
+    let mut raw_sockets: Vec<(procfs::RawSocket, Protocol, bool)> = Vec::new();
 
-    for s in procfs::parse_proc_net_tcp(false) {
-        raw_sockets.push((s, Protocol::Tcp));
+    for s in procfs::parse_proc_net_tcp(false) { // IPv4
+        raw_sockets.push((s, Protocol::Tcp, false));
     }
-    for s in procfs::parse_proc_net_tcp(true) {
-        raw_sockets.push((s, Protocol::Tcp));
+    for s in procfs::parse_proc_net_tcp(true) { // IPv6 TCP
+        raw_sockets.push((s, Protocol::Tcp, true));
     }
-    for s in procfs::parse_proc_net_udp(false) {
-        raw_sockets.push((s, Protocol::Udp));
+    for s in procfs::parse_proc_net_udp(false) { // IPv4 UDP
+        raw_sockets.push((s, Protocol::Udp, false));
     }
-    for s in procfs::parse_proc_net_udp(true) {
-        raw_sockets.push((s, Protocol::Udp));
+    for s in procfs::parse_proc_net_udp(true) { // IPv6 UDP
+        raw_sockets.push((s, Protocol::Udp, true));
     }
 
     // Build inode → PID mapping
@@ -34,9 +34,9 @@ pub fn collect_connections() -> Vec<Connection> {
 
     let mut connections = Vec::with_capacity(raw_sockets.len());
 
-    for (raw, protocol) in raw_sockets {
-        let local_ip = u128_to_ip(raw.local_addr);
-        let remote_ip = u128_to_ip(raw.remote_addr);
+    for (raw, protocol, is_v6) in raw_sockets {
+        let local_ip = u128_to_ip(raw.local_addr, is_v6);
+        let remote_ip = u128_to_ip(raw.remote_addr, is_v6);
 
         let local_addr = SocketAddr::new(local_ip, raw.local_port);
         let remote_addr = SocketAddr::new(remote_ip, raw.remote_port);
@@ -122,8 +122,8 @@ pub fn aggregate_by_process(conns: &[Connection]) -> Vec<(String, u32)> {
 
 /// Convert a u128 (as stored by procfs parser) into an IpAddr.
 /// Values ≤ 0xFFFFFFFF are treated as IPv4, otherwise IPv6.
-fn u128_to_ip(addr: u128) -> IpAddr {
-    if addr <= u32::MAX as u128 {
+fn u128_to_ip(addr: u128, is_ipv6: bool) -> IpAddr {
+    if !is_ipv6 && addr <= u32::MAX as u128 {
         IpAddr::V4(Ipv4Addr::from(addr as u32))
     } else {
         IpAddr::V6(Ipv6Addr::from(addr))
