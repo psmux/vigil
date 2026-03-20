@@ -1,8 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::mpsc;
+use std::time::Instant;
 
+use crate::data;
 use crate::data::*;
+use crate::score;
 
 // ─── View enum ────────────────────────────────────────────────────
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +120,10 @@ pub struct App {
 
     // Aggregated stats
     pub top_attacker_countries: Vec<(String, u32)>,
+
+    // Data collection
+    system_collector: Option<data::system::SystemCollector>,
+    tick_start: Instant,
 }
 
 impl App {
@@ -166,6 +173,9 @@ impl App {
             scroll_offset: 0,
 
             top_attacker_countries: Vec::new(),
+
+            system_collector: Some(data::system::SystemCollector::new()),
+            tick_start: Instant::now(),
         }
     }
 
@@ -213,7 +223,100 @@ impl App {
     pub fn tick(&mut self) {
         self.tick_count += 1;
         self.animation_frame = (self.animation_frame + 1) % 8;
+
+        // ── Uptime (every tick) ──────────────────────────────────────
+        self.uptime_secs = sysinfo::System::uptime();
+
+        // ── System info refresh (every 5 ticks) ─────────────────────
+        if self.tick_count % 5 == 0 {
+            // Take the collector out to satisfy the borrow checker —
+            // we need &mut SystemCollector but also &mut self later.
+            if let Some(mut collector) = self.system_collector.take() {
+                let (cpu, memory, disks) = collector.refresh();
+                self.cpu = cpu;
+                self.memory = memory;
+                self.disks = disks;
+                self.system_collector = Some(collector);
+            }
+        }
+
+        // ── Services and interfaces (every 10 ticks) ────────────────
+        if self.tick_count % 10 == 0 {
+            self.services = data::system::collect_services();
+            self.interfaces = data::system::collect_interfaces();
+        }
+
+        // ── Port analysis (every 3 ticks) ───────────────────────────
+        if self.tick_count % 3 == 0 {
+            self.ports = data::ports::collect_listening_ports(&self.connections);
+            // Re-classify risk with current firewall rules
+            for port in &mut self.ports {
+                port.risk = data::ports::classify_risk(
+                    port.port,
+                    port.bind_addr,
+                    &port.process_name,
+                    &self.firewall_rules,
+                );
+                port.auth = data::ports::detect_auth(port.port, &port.process_name);
+            }
+        }
+
+        // ── GeoIP enrichment (every tick, for new connections) ───────
+        // Collect IPs that need lookup first, then mutate cache + connections.
+        let new_ips: Vec<IpAddr> = self
+            .connections
+            .iter()
+            .map(|c| c.remote_addr.ip())
+            .filter(|ip| !data::geoip::is_private_ip(*ip) && !self.geoip_cache.contains_key(ip))
+            .collect();
+
+        for ip in new_ips {
+            if let Some(geo) = data::geoip::lookup(ip) {
+                self.geoip_cache.insert(ip, geo);
+            }
+        }
+
+        // Apply cached geo to connections that don't have it yet
+        for conn in &mut self.connections {
+            if conn.geo.is_none() {
+                let remote_ip = conn.remote_addr.ip();
+                if let Some(geo) = self.geoip_cache.get(&remote_ip) {
+                    conn.geo = Some(geo.clone());
+                }
+            }
+        }
+
+        // ── Attack country enrichment ────────────────────────────────
+        // Ensure attack source IPs are in the geoip cache
+        let attack_ips: Vec<IpAddr> = self
+            .attacks
+            .iter()
+            .map(|a| a.source_ip)
+            .filter(|ip| !data::geoip::is_private_ip(*ip) && !self.geoip_cache.contains_key(ip))
+            .collect();
+
+        for ip in attack_ips {
+            if let Some(geo) = data::geoip::lookup(ip) {
+                self.geoip_cache.insert(ip, geo);
+            }
+        }
+
         self.recalc_top_attacker_countries();
+
+        // ── Security score (every 5 ticks) ──────────────────────────
+        if self.tick_count % 5 == 0 {
+            let (new_score, _factors) = score::compute_score(self);
+            self.security_score = new_score;
+
+            // Compute score delta: compare current to initial baseline
+            // (positive = improved, negative = degraded)
+            let elapsed_secs = self.tick_start.elapsed().as_secs();
+            if elapsed_secs >= 3600 {
+                // After 1 hour we can track a real delta; for now, report 0
+                // since we don't persist the 1-hour-ago score yet.
+                self.score_delta_1h = 0;
+            }
+        }
     }
 
     fn recalc_top_attacker_countries(&mut self) {

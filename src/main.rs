@@ -45,9 +45,8 @@ fn main() -> anyhow::Result<()> {
     let mut app = App::new();
     let (tx, rx) = mpsc::channel::<DataUpdate>();
 
-    // Spawn placeholder background threads
-    // Each thread will eventually collect real data; for now they just sleep.
-    spawn_placeholder_threads(tx, &config);
+    // Spawn real background data-collection threads
+    spawn_data_threads(tx, &config);
 
     // Main event loop
     let tick_rate = Duration::from_millis(config.tick_rate_ms);
@@ -96,51 +95,55 @@ fn restore_terminal() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Spawn placeholder background data-collection threads.
-fn spawn_placeholder_threads(_tx: mpsc::Sender<DataUpdate>, _config: &VigilConfig) {
-    // Connection collector (placeholder)
+/// Spawn real background data-collection threads.
+fn spawn_data_threads(tx: mpsc::Sender<DataUpdate>, _config: &VigilConfig) {
+    // 1. Connection collector — every 2s parses /proc/net/tcp* and /proc/net/udp*
     {
-        let _tx = _tx.clone();
+        let tx = tx.clone();
         std::thread::spawn(move || loop {
+            let conns = data::connections::collect_connections();
+            let _ = tx.send(DataUpdate::Connections(conns));
             std::thread::sleep(Duration::from_secs(2));
-            // TODO: parse /proc/net/tcp and send DataUpdate::Connections
         });
     }
 
-    // Bandwidth monitor (placeholder)
+    // 2. Bandwidth monitor — every 1s samples /proc/net/dev for rx/tx bps
     {
-        let _tx = _tx.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(1));
-            // TODO: read /proc/net/dev deltas and send DataUpdate::Bandwidth
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let mut tracker = data::bandwidth::BandwidthTracker::new();
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+                let (rx_bps, tx_bps) = tracker.sample();
+                let _ = tx.send(DataUpdate::Bandwidth { rx_bps, tx_bps });
+            }
         });
     }
 
-    // Attack log watcher (placeholder)
+    // 3. Attack log watcher — tails auth.log / journalctl for SSH brute-force events
     {
-        let _tx = _tx.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(5));
-            // TODO: tail auth.log and send DataUpdate::Attack
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            data::attacks::attack_monitor_thread(tx);
         });
     }
 
-    // Firewall rules poller (placeholder)
+    // 4. Firewall rules poller — every 30s queries ufw/iptables
     {
-        let _tx = _tx.clone();
+        let tx = tx.clone();
         std::thread::spawn(move || loop {
+            let (rules, default_deny, _active) = data::firewall::collect_firewall_info();
+            let _ = tx.send(DataUpdate::FirewallRules(rules, default_deny));
             std::thread::sleep(Duration::from_secs(30));
-            // TODO: parse ufw/iptables and send DataUpdate::FirewallRules
         });
     }
 
-    // Fail2ban / banned IPs poller (placeholder)
+    // 5. Fail2ban monitor — polls fail2ban-client for banned IPs
     {
         #[allow(clippy::redundant_clone)]
-        let _tx = _tx.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(10));
-            // TODO: query fail2ban-client and send DataUpdate::BannedIps
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            data::fail2ban::fail2ban_monitor_thread(tx);
         });
     }
 }
