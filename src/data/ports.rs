@@ -36,8 +36,9 @@ pub fn collect_listening_ports(connections: &[Connection]) -> Vec<ListeningPort>
 
     let mut ports: Vec<ListeningPort> = Vec::new();
 
-    for (&(port, protocol), listener) in &listeners {
+    for (&(port, _proto_d), listener) in &listeners {
         let bind_addr = listener.local_addr.ip();
+        let protocol = listener.protocol;
         let process = listener
             .process_name
             .clone()
