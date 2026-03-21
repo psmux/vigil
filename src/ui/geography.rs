@@ -10,7 +10,8 @@ use crate::app::App;
 use crate::data::TcpState;
 use crate::theme;
 use crate::widgets::bar_chart::{draw_bar_chart, BarItem};
-use crate::widgets::braille_map::{country_center, draw_world_map, MapDot};
+use crate::widgets::braille_map::{country_center, MapDot};
+use crate::widgets::terminal_map::draw_terminal_map;
 
 /// Draw the Geography view (View 5).
 ///
@@ -105,7 +106,7 @@ fn draw_map(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    draw_world_map(f, area, &dots, app.animation_frame, "Connections World Map");
+    draw_terminal_map(f, area, &dots, app.animation_frame, "Connections World Map");
 }
 
 /// Try to find country center coordinates for an IP via the geoip_cache.

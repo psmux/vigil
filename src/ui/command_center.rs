@@ -10,7 +10,8 @@ use crate::data::alerts::AlertSeverity;
 use crate::format::{format_bps, format_count};
 use crate::theme;
 use crate::widgets::bar_chart::{self, BarItem};
-use crate::widgets::braille_map::{self, MapDot};
+use crate::widgets::braille_map::MapDot;
+use crate::widgets::terminal_map;
 use crate::widgets::gauge;
 use crate::widgets::kpi_badge;
 use crate::widgets::sparkline;
@@ -110,7 +111,7 @@ fn draw_top_row(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    braille_map::draw_world_map(f, cols[1], &dots, app.animation_frame, "Attack Map");
+    terminal_map::draw_terminal_map(f, cols[1], &dots, app.animation_frame, "Attack Map");
 }
 
 fn draw_kpi_strip(f: &mut Frame, app: &App, area: Rect) {

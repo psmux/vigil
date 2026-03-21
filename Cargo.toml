@@ -20,6 +20,8 @@ serde_json = "1.0"
 dns-lookup = "2"
 anyhow = "1"
 dirs = "5"
+terminalmap = { git = "https://github.com/psmux/TerminalMap.git", branch = "master" }
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
 
 [profile.release]
 opt-level = 3
