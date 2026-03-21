@@ -300,126 +300,137 @@ fn short_state(state: TcpState) -> &'static str {
 // ─── Detail Pane (Middle) ───────────────────────────────────────────
 
 fn draw_detail_pane(f: &mut Frame, app: &App, area: Rect) {
+    let expand_icon = if app.wire_detail_expanded { "\u{25bc}" } else { "\u{25b6}" };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
-        .title(Span::styled(
-            " Event Detail ",
-            Style::default().fg(theme::TITLE).add_modifier(Modifier::BOLD),
-        ))
+        .title(vec![
+            Span::styled(
+                format!(" {} Event Detail ", expand_icon),
+                Style::default().fg(theme::TITLE).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " Enter=expand/collapse ",
+                Style::default().fg(Color::Rgb(80, 90, 110)),
+            ),
+        ])
         .style(Style::default().bg(theme::BG));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if inner.width < 30 || inner.height < 2 {
+    if inner.width < 30 || inner.height < 1 {
         return;
     }
 
     let events = app.wire_tracker.events();
     let selected = app.wire_selected;
-
     let event = events.get(selected);
 
     let mut lines: Vec<Line> = Vec::new();
+    let lbl = Style::default().fg(Color::Rgb(100, 180, 255)).add_modifier(Modifier::BOLD);
+    let val = Style::default().fg(theme::TEXT);
+    let dim = Style::default().fg(theme::TEXT_DIM);
 
     if let Some(ev) = event {
-        let lbl = Style::default().fg(Color::Rgb(100, 180, 255)).add_modifier(Modifier::BOLD);
-        let val = Style::default().fg(theme::TEXT);
-        let dim = Style::default().fg(theme::TEXT_DIM);
-
-        // Layer 1: Event
+        // Always show the summary line (even when collapsed)
         let kind_str = match &ev.kind {
             WireEventKind::NewConnection => "New Connection",
             WireEventKind::ConnectionClosed => "Connection Closed",
             WireEventKind::StateChange { .. } => "State Transition",
         };
-        lines.push(Line::from(vec![
-            Span::styled("  \u{25b8} Event:   ", lbl),
-            Span::styled(kind_str.to_string(), val),
-            Span::styled(format!("  ({})", ev.state.label()), dim),
-        ]));
-
-        // Layer 2: Transport
+        let proc_name = ev.process_name.as_deref().unwrap_or("?");
         let proto = if ev.protocol == Protocol::Tcp { "TCP" } else { "UDP" };
-        let dir_label = match ev.direction {
-            Direction::Outbound => "\u{2192} Outbound",
-            Direction::Inbound => "\u{2190} Inbound",
-            Direction::Local => "\u{2194} Local",
-            Direction::Unknown => "? Unknown",
-        };
+
         lines.push(Line::from(vec![
-            Span::styled("  \u{25b8} Network: ", lbl),
-            Span::styled(format!("{} {} \u{2192} {}  ", proto, ev.local_addr, ev.remote_addr), val),
-            Span::styled(format!("({})", dir_label), dim),
+            Span::styled("  \u{25b8} ", lbl),
+            Span::styled(format!("{} ", kind_str), val),
+            Span::styled(format!("| {} {} \u{2192} {} ", proto, ev.local_addr, ev.remote_addr), dim),
+            Span::styled(format!("| {} ", ev.service.label()), Style::default().fg(ev.service.color())),
+            Span::styled(format!("| {} ", proc_name), Style::default().fg(theme::GREEN)),
         ]));
 
-        // Layer 3: Service
-        lines.push(Line::from(vec![
-            Span::styled("  \u{25b8} Service: ", lbl),
-            Span::styled(ev.service.label().to_string(), Style::default().fg(ev.service.color())),
-            Span::styled(format!("  (port {})", ev.remote_addr.port()), dim),
-        ]));
-
-        // Layer 4: Process
-        let proc_name = ev.process_name.as_deref().unwrap_or("unknown");
-        let pid_str = ev.pid.map(|p| format!(" (PID {})", p)).unwrap_or_default();
-        lines.push(Line::from(vec![
-            Span::styled("  \u{25b8} Process: ", lbl),
-            Span::styled(proc_name.to_string(), Style::default().fg(theme::GREEN)),
-            Span::styled(pid_str, dim),
-        ]));
-
-        // Layer 5: GeoIP
-        if !ev.country_code.is_empty() {
-            let hostname = ev.hostname.as_deref().unwrap_or("");
+        // Expanded detail layers
+        if app.wire_detail_expanded {
+            // Network layer
+            let dir_label = match ev.direction {
+                Direction::Outbound => "\u{2192} Outbound",
+                Direction::Inbound => "\u{2190} Inbound",
+                Direction::Local => "\u{2194} Local",
+                Direction::Unknown => "? Unknown",
+            };
             lines.push(Line::from(vec![
-                Span::styled("  \u{25b8} GeoIP:   ", lbl),
-                Span::styled(format!("{}", ev.country_code), Style::default().fg(theme::CYAN)),
-                Span::styled(if hostname.is_empty() { String::new() } else { format!("  {}", hostname) }, dim),
+                Span::styled("    \u{25b8} Network: ", lbl),
+                Span::styled(format!("{} {} \u{2192} {} ", proto, ev.local_addr, ev.remote_addr), val),
+                Span::styled(format!("({})", dir_label), dim),
             ]));
-        }
 
-        // Layer 6: Bandwidth (if available)
-        if ev.tx_bps > 0.0 || ev.rx_bps > 0.0 {
+            // Service
             lines.push(Line::from(vec![
-                Span::styled("  \u{25b8} Traffic: ", lbl),
-                Span::styled(format!("\u{2191}{}", format_bps(ev.tx_bps)), Style::default().fg(theme::UPLOAD)),
-                Span::styled("  ", dim),
-                Span::styled(format!("\u{2193}{}", format_bps(ev.rx_bps)), Style::default().fg(theme::DOWNLOAD)),
+                Span::styled("    \u{25b8} Service: ", lbl),
+                Span::styled(ev.service.label().to_string(), Style::default().fg(ev.service.color())),
+                Span::styled(format!("  (port {})", ev.remote_addr.port()), dim),
             ]));
-        }
 
-        // Layer 7: Timestamp
-        lines.push(Line::from(vec![
-            Span::styled("  \u{25b8} Time:    ", lbl),
-            Span::styled(ev.timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string(), dim),
-            Span::styled(format!("  ({})", format_time_ago(ev.timestamp)), dim),
-        ]));
-
-        // Layer 8: Threat flag
-        if ev.is_threat {
+            // Process
+            let pid_str = ev.pid.map(|p| format!(" (PID {})", p)).unwrap_or_default();
             lines.push(Line::from(vec![
-                Span::styled("  \u{25b8} ", lbl),
-                Span::styled(
-                    "\u{2620} THREAT — this IP is on the threat intelligence blocklist",
-                    Style::default().fg(Color::Rgb(255, 60, 60)).add_modifier(Modifier::BOLD),
-                ),
+                Span::styled("    \u{25b8} Process: ", lbl),
+                Span::styled(proc_name.to_string(), Style::default().fg(theme::GREEN)),
+                Span::styled(pid_str, dim),
             ]));
-        }
 
-        // State change detail
-        if let WireEventKind::StateChange { from, to } = &ev.kind {
+            // GeoIP
+            if !ev.country_code.is_empty() {
+                let hostname = ev.hostname.as_deref().unwrap_or("");
+                lines.push(Line::from(vec![
+                    Span::styled("    \u{25b8} GeoIP:   ", lbl),
+                    Span::styled(ev.country_code.clone(), Style::default().fg(theme::CYAN)),
+                    Span::styled(if hostname.is_empty() { String::new() } else { format!("  {}", hostname) }, dim),
+                ]));
+            }
+
+            // Bandwidth
+            if ev.tx_bps > 0.0 || ev.rx_bps > 0.0 {
+                lines.push(Line::from(vec![
+                    Span::styled("    \u{25b8} Traffic: ", lbl),
+                    Span::styled(format!("\u{2191}{}", format_bps(ev.tx_bps)), Style::default().fg(theme::UPLOAD)),
+                    Span::styled("  ", dim),
+                    Span::styled(format!("\u{2193}{}", format_bps(ev.rx_bps)), Style::default().fg(theme::DOWNLOAD)),
+                ]));
+            }
+
+            // Timestamp
             lines.push(Line::from(vec![
-                Span::styled("  \u{25b8} Change:  ", lbl),
-                Span::styled(from.label().to_string(), Style::default().fg(theme::WARN)),
-                Span::styled(" \u{2192} ", dim),
-                Span::styled(to.label().to_string(), Style::default().fg(theme::GREEN)),
+                Span::styled("    \u{25b8} Time:    ", lbl),
+                Span::styled(ev.timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string(), dim),
+                Span::styled(format!("  ({})", format_time_ago(ev.timestamp)), dim),
             ]));
+
+            // Threat
+            if ev.is_threat {
+                lines.push(Line::from(vec![
+                    Span::styled("    \u{25b8} ", lbl),
+                    Span::styled(
+                        "\u{2620} THREAT — IP on threat intelligence blocklist",
+                        Style::default().fg(Color::Rgb(255, 60, 60)).add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            }
+
+            // State change
+            if let WireEventKind::StateChange { from, to } = &ev.kind {
+                lines.push(Line::from(vec![
+                    Span::styled("    \u{25b8} Change:  ", lbl),
+                    Span::styled(from.label().to_string(), Style::default().fg(theme::WARN)),
+                    Span::styled(" \u{2192} ", dim),
+                    Span::styled(to.label().to_string(), Style::default().fg(theme::GREEN)),
+                ]));
+            }
         }
     } else {
         lines.push(Line::from(Span::styled(
-            "  Select an event above to view details",
+            "  Select an event with j/k to view details (Enter to expand)",
             Style::default().fg(theme::TEXT_DIM),
         )));
     }
@@ -461,10 +472,16 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(format!("\u{2191}{} ", format_bps(app.current_tx_bps)), Style::default().fg(theme::UPLOAD)),
         Span::styled(format!("\u{2193}{} ", format_bps(app.current_rx_bps)), Style::default().fg(theme::DOWNLOAD)),
         Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-        Span::styled(
-            " j/k:scroll  G:latest  z:pause ",
-            Style::default().fg(theme::TEXT_DIM),
-        ),
+        Span::styled(" j", Style::default().fg(Color::Rgb(255, 200, 80))),
+        Span::styled("/", Style::default().fg(theme::TEXT_DIM)),
+        Span::styled("k", Style::default().fg(Color::Rgb(255, 200, 80))),
+        Span::styled(":select ", Style::default().fg(theme::TEXT_DIM)),
+        Span::styled("G", Style::default().fg(Color::Rgb(255, 200, 80))),
+        Span::styled(":latest ", Style::default().fg(theme::TEXT_DIM)),
+        Span::styled("Enter", Style::default().fg(Color::Rgb(255, 200, 80))),
+        Span::styled(":detail ", Style::default().fg(theme::TEXT_DIM)),
+        Span::styled("?", Style::default().fg(Color::Rgb(255, 200, 80))),
+        Span::styled(":help ", Style::default().fg(theme::TEXT_DIM)),
     ]);
 
     let paragraph = Paragraph::new(line).style(Style::default().bg(theme::BG));

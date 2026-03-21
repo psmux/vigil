@@ -189,6 +189,8 @@ pub struct App {
     pub wire_selected: usize,
     /// Auto-scroll mode: follows newest events. Disabled when user scrolls up.
     pub wire_auto_scroll: bool,
+    /// Which detail sections are expanded in Wire view (indexed by layer name).
+    pub wire_detail_expanded: bool,
 
     // Data collection
     system_collector: Option<data::system::SystemCollector>,
@@ -272,6 +274,7 @@ impl App {
             wire_tracker: WireTracker::new(),
             wire_selected: 0,
             wire_auto_scroll: true,
+            wire_detail_expanded: true,
 
             system_collector: Some(data::system::SystemCollector::new()),
             tick_start: Instant::now(),

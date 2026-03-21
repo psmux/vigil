@@ -69,8 +69,10 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
             app.wire_auto_scroll = true;
         }
 
-        // Wire: Enter = select (no-op, selection already works via j/k)
-        KeyCode::Enter if app.view == View::Wire => {}
+        // Wire: Enter = expand/collapse detail pane
+        KeyCode::Enter if app.view == View::Wire => {
+            app.wire_detail_expanded = !app.wire_detail_expanded;
+        }
 
         // Refresh (no-op — refresh is automatic)
         KeyCode::Char('r') => {}
@@ -83,6 +85,11 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
         // Help overlay toggle
         KeyCode::Char('?') => {
             app.show_help = !app.show_help;
+        }
+        KeyCode::Esc => {
+            if app.show_help {
+                app.show_help = false;
+            }
         }
 
         // Mark all alerts as read
