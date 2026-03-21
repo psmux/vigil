@@ -1,12 +1,16 @@
 //! Outbound connection tracking — per-app outbound stats, first-seen detection,
 //! bandwidth tracking, and unusual bandwidth alerting.
+//!
+//! Shows EVERY outbound connection: any connection where the local machine
+//! initiated the connection to a non-loopback remote, regardless of protocol,
+//! port, or whether the remote is public/private/LAN/VPN.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 
 use chrono::{DateTime, Utc};
 
-use crate::data::{Connection, Direction, GeoLocation, Protocol, TcpState};
+use crate::data::{Connection, Direction, GeoLocation, TcpState};
 
 // ─── Per-app outbound summary ───────────────────────────────────────
 
@@ -57,7 +61,7 @@ pub struct OutboundTracker {
     first_seen: HashMap<(String, IpAddr), DateTime<Utc>>,
     /// app_name → rolling average tx_bps (exponential moving average).
     app_bandwidth_avg: HashMap<String, f64>,
-    /// How many ticks old a connection is before it's no longer "new".
+    /// How many seconds a connection is considered "new".
     new_threshold_secs: i64,
     /// Multiplier: if current bandwidth > avg * multiplier → unusual.
     unusual_multiplier: f64,
@@ -68,12 +72,16 @@ impl OutboundTracker {
         Self {
             first_seen: HashMap::new(),
             app_bandwidth_avg: HashMap::new(),
-            new_threshold_secs: 60, // connections are "new" for 60 seconds
+            new_threshold_secs: 60,
             unusual_multiplier: 3.0,
         }
     }
 
     /// Process current connections and produce per-app outbound stats.
+    ///
+    /// Includes EVERY connection with Direction::Outbound that has an
+    /// owning process.  No state filtering — if the kernel shows it and
+    /// a process owns it, we show it.
     pub fn process(
         &mut self,
         connections: &[Connection],
@@ -86,41 +94,16 @@ impl OutboundTracker {
         let mut app_conns: HashMap<String, Vec<&Connection>> = HashMap::new();
 
         for conn in connections {
-            // For TCP: skip fully dead states with no owning process
-            // For UDP: state 07 (Close) is the normal active state — don't skip
-            if conn.protocol == Protocol::Tcp {
-                match conn.state {
-                    TcpState::TimeWait | TcpState::Close | TcpState::LastAck
-                    | TcpState::Closing => continue,
-                    _ => {}
-                }
-            }
-
-            // Include any connection classified as Outbound.
-            // Also include Unknown-direction established/active connections
-            // (better to show too much than miss real outbound traffic).
-            let is_outbound = conn.direction == Direction::Outbound
-                || (conn.direction == Direction::Unknown
-                    && !matches!(conn.state, TcpState::Listen));
-
-            if !is_outbound {
+            // Only outbound
+            if conn.direction != Direction::Outbound {
                 continue;
             }
 
-            // Skip loopback and local
-            if conn.remote_addr.ip().is_loopback() {
-                continue;
-            }
-
-            // Skip kernel-owned sockets with no real process
-            if let Some(ref name) = conn.process_name {
-                if name.starts_with('[') { continue; }
-            }
-
-            let app_name = conn
-                .process_name
-                .clone()
-                .unwrap_or_else(|| "<unknown>".into());
+            // Skip unowned kernel sockets (no process to attribute)
+            let app_name = match &conn.process_name {
+                Some(name) if !name.starts_with('[') => name.clone(),
+                _ => continue,
+            };
 
             app_conns.entry(app_name).or_default().push(conn);
         }
@@ -191,7 +174,7 @@ impl OutboundTracker {
             });
 
             // Unusual bandwidth detection (EMA)
-            let alpha = 0.1; // smoothing factor
+            let alpha = 0.1;
             let avg = self.app_bandwidth_avg.entry(app_name.clone()).or_insert(0.0);
             let bandwidth_unusual = total_tx > *avg * self.unusual_multiplier && *avg > 1024.0;
             *avg = alpha * total_tx + (1.0 - alpha) * *avg;
@@ -216,10 +199,11 @@ impl OutboundTracker {
             });
         }
 
-        // Sort apps: unusual first, then by tx_bps descending
+        // Sort apps: most connections first, unusual bumped to top
         result.sort_by(|a, b| {
             b.bandwidth_unusual
                 .cmp(&a.bandwidth_unusual)
+                .then_with(|| b.conn_count.cmp(&a.conn_count))
                 .then_with(|| b.tx_bps.partial_cmp(&a.tx_bps).unwrap_or(std::cmp::Ordering::Equal))
         });
 
