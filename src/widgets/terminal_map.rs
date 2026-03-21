@@ -1,14 +1,14 @@
-//! TerminalMap integration — renders OSM vector tile maps via the
-//! terminalmap crate in a background thread, with proper ANSI→ratatui
-//! conversion for display in the dashboard.
+//! TerminalMap integration — renders OSM vector tile maps by writing
+//! the ANSI frame directly to the terminal (same as TerminalMap standalone),
+//! bypassing ratatui's widget system for the map area to avoid conversion loss.
 
+use std::io::Write;
 use std::sync::{Arc, Mutex, LazyLock};
 use std::thread;
 
-use ansi_to_tui::IntoText;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span, Text};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
@@ -16,7 +16,6 @@ use crate::theme;
 
 // ─── MapDot ─────────────────────────────────────────────────────────
 
-/// A single dot to render on the world map.
 pub struct MapDot {
     pub lat: f64,
     pub lon: f64,
@@ -53,12 +52,13 @@ pub fn country_center(iso2: &str) -> Option<(f64, f64)> {
         .map(|(_, lon, lat)| (*lon, *lat))
 }
 
-// ─── Shared State ───────────────────────────────────────────────────
+// ─── Cached ANSI Frame ──────────────────────────────────────────────
 
 struct CachedFrame {
     cols: u16,
     rows: u16,
-    text: Text<'static>,
+    ansi: String,
+    footer: String,
 }
 
 static MAP_FRAME: LazyLock<Arc<Mutex<Option<CachedFrame>>>> =
@@ -72,10 +72,10 @@ static MAP_STARTED: LazyLock<Arc<std::sync::atomic::AtomicBool>> =
 
 enum MapCmd {
     Resize(u16, u16),
-    UpdateMarkers(Vec<(f64, f64, u8)>), // lat, lon, xterm color
+    UpdateMarkers(Vec<(f64, f64, u8, bool)>), // lat, lon, color, pulsing
 }
 
-// ─── Background Renderer Thread ─────────────────────────────────────
+// ─── Background Renderer ────────────────────────────────────────────
 
 fn ensure_started() {
     if MAP_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -97,42 +97,33 @@ fn ensure_started() {
                 initial_lat: 20.0,
                 initial_lon: 0.0,
                 initial_zoom: None,
-                show_labels: false,
+                show_labels: true,
                 persist_downloaded_tiles: true,
                 ..terminalmap::config::MapConfig::default()
             };
 
             let mut map = match terminalmap::widget::MapState::new(config).await {
                 Ok(m) => m,
-                Err(e) => {
-                    eprintln!("TerminalMap init failed: {}", e);
-                    return;
-                }
+                Err(_) => return,
             };
 
-            let mut current_cols: u16 = 100;
-            let mut current_rows: u16 = 25;
-            // Convert terminal cells to braille pixel dimensions directly:
-            // Each terminal column = 2 braille dots wide
-            // Each terminal row = 4 braille dots tall
-            // No footer subtraction — we're inside a ratatui widget
-            map.set_size(current_cols as usize * 2, current_rows as usize * 4);
+            let mut cur_cols: u16 = 120;
+            let mut cur_rows: u16 = 30;
+            map.set_size(cur_cols as usize * 2, cur_rows as usize * 4);
             map.fit_world();
 
-            // Render initial frame immediately
-            render_and_cache(&map, current_cols, current_rows, &frame_out).await;
+            // Initial render
+            do_render(&map, cur_cols, cur_rows, &frame_out).await;
 
             loop {
                 let mut needs_render = false;
 
-                // Drain all pending commands
                 while let Ok(cmd) = rx.try_recv() {
                     match cmd {
                         MapCmd::Resize(c, r) => {
-                            if c != current_cols || r != current_rows {
-                                current_cols = c;
-                                current_rows = r;
-                                // Direct pixel size: cols*2 wide, rows*4 tall
+                            if c != cur_cols || r != cur_rows {
+                                cur_cols = c;
+                                cur_rows = r;
                                 map.set_size(c as usize * 2, r as usize * 4);
                                 map.fit_world();
                                 needs_render = true;
@@ -140,10 +131,15 @@ fn ensure_started() {
                         }
                         MapCmd::UpdateMarkers(markers) => {
                             map.clear_markers();
-                            for (lat, lon, color) in &markers {
+                            for (lat, lon, color, pulsing) in &markers {
+                                let anim = if *pulsing {
+                                    terminalmap::marker::MarkerAnimation::Pulse
+                                } else {
+                                    terminalmap::marker::MarkerAnimation::None
+                                };
                                 map.add_marker(
                                     terminalmap::marker::MapMarker::dot(*lat, *lon, *color)
-                                        .with_animation(terminalmap::marker::MarkerAnimation::Pulse),
+                                        .with_animation(anim),
                                 );
                             }
                             needs_render = true;
@@ -151,34 +147,33 @@ fn ensure_started() {
                     }
                 }
 
-                // Also re-render periodically for animated markers
-                if map.has_animated_markers() {
-                    map.advance_tick();
+                // Advance tick for animations
+                map.advance_tick();
+                let camera_moved = map.update_camera();
+                if map.needs_animation_redraw() || camera_moved {
                     needs_render = true;
                 }
 
                 if needs_render {
-                    render_and_cache(&map, current_cols, current_rows, &frame_out).await;
+                    do_render(&map, cur_cols, cur_rows, &frame_out).await;
                 }
 
-                std::thread::sleep(std::time::Duration::from_millis(400));
+                std::thread::sleep(std::time::Duration::from_millis(200));
             }
         });
     });
 }
 
-async fn render_and_cache(
+async fn do_render(
     map: &terminalmap::widget::MapState,
     cols: u16,
     rows: u16,
-    frame_out: &Arc<Mutex<Option<CachedFrame>>>,
+    out: &Arc<Mutex<Option<CachedFrame>>>,
 ) {
     if let Ok(ansi) = map.render().await {
-        // Use ansi-to-tui for proper ANSI → ratatui conversion
-        if let Ok(text) = ansi.into_text() {
-            if let Ok(mut guard) = frame_out.lock() {
-                *guard = Some(CachedFrame { cols, rows, text });
-            }
+        let footer = map.footer();
+        if let Ok(mut guard) = out.lock() {
+            *guard = Some(CachedFrame { cols, rows, ansi, footer });
         }
     }
 }
@@ -193,6 +188,9 @@ fn send_cmd(cmd: MapCmd) {
 
 // ─── Public Draw Function ───────────────────────────────────────────
 
+/// Draw the TerminalMap. Writes the ANSI frame directly to stdout
+/// at the correct position (same technique as TerminalMap standalone),
+/// then renders the border/title/footer via ratatui.
 pub fn draw_terminal_map(
     f: &mut Frame,
     area: Rect,
@@ -202,6 +200,7 @@ pub fn draw_terminal_map(
 ) {
     ensure_started();
 
+    // Draw the border via ratatui
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
@@ -218,38 +217,61 @@ pub fn draw_terminal_map(
         return;
     }
 
-    // Send resize if the widget area changed
-    send_cmd(MapCmd::Resize(inner.width, inner.height));
+    // Send resize + markers to background thread
+    // Reserve 1 row at bottom for the footer/status
+    let map_rows = inner.height.saturating_sub(1);
+    send_cmd(MapCmd::Resize(inner.width, map_rows));
 
-    // Send connection dots as markers
     if !dots.is_empty() {
-        let markers: Vec<(f64, f64, u8)> = dots
+        let markers: Vec<(f64, f64, u8, bool)> = dots
             .iter()
             .take(150)
             .map(|d| {
-                let xterm_color = if d.pulsing { 196u8 } else { 48u8 }; // red for threats, green for normal
-                (d.lat, d.lon, xterm_color)
+                let color = if d.pulsing { 196u8 } else { 48u8 };
+                (d.lat, d.lon, color, d.pulsing)
             })
             .collect();
         send_cmd(MapCmd::UpdateMarkers(markers));
     }
 
-    // Display cached frame
+    // Get cached frame
     let cached = MAP_FRAME.lock().ok().and_then(|guard| {
-        guard.as_ref().map(|cf| cf.text.clone())
+        guard.as_ref().map(|cf| (cf.ansi.clone(), cf.footer.clone()))
     });
 
     match cached {
-        Some(text) => {
-            // Clip to inner area height
-            let lines: Vec<Line> = text.lines
-                .into_iter()
-                .take(inner.height as usize)
-                .collect();
-            let paragraph = Paragraph::new(lines);
-            f.render_widget(paragraph, inner);
+        Some((ansi, footer)) => {
+            // Write the ANSI map frame directly to stdout at the inner area position.
+            // This bypasses ratatui for the map content — same as TerminalMap standalone.
+            let mut stdout = std::io::stdout();
+            let origin_x = inner.x;
+            let origin_y = inner.y;
+
+            // Split ANSI frame into lines and write each at the correct row
+            for (row_idx, line) in ansi.split('\n').enumerate() {
+                let line = line.trim_end_matches('\r');
+                if row_idx >= map_rows as usize {
+                    break;
+                }
+                let _ = crossterm::execute!(
+                    stdout,
+                    crossterm::cursor::MoveTo(origin_x, origin_y + row_idx as u16)
+                );
+                let _ = write!(stdout, "{}", line);
+            }
+
+            // Footer line at the bottom of the inner area
+            let footer_y = origin_y + map_rows;
+            let _ = crossterm::execute!(
+                stdout,
+                crossterm::cursor::MoveTo(origin_x, footer_y)
+            );
+            // Dim footer
+            let _ = write!(stdout, "\x1B[38;5;243m{}\x1B[0m", &footer[..footer.len().min(inner.width as usize)]);
+            let _ = stdout.flush();
         }
         None => {
+            // Loading state via ratatui
             let loading = Paragraph::new(vec![
                 Line::from(""),
                 Line::from(Span::styled(
