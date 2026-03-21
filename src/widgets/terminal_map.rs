@@ -112,7 +112,11 @@ fn ensure_started() {
 
             let mut current_cols: u16 = 100;
             let mut current_rows: u16 = 25;
-            map.set_size_from_terminal(current_cols, current_rows);
+            // Convert terminal cells to braille pixel dimensions directly:
+            // Each terminal column = 2 braille dots wide
+            // Each terminal row = 4 braille dots tall
+            // No footer subtraction — we're inside a ratatui widget
+            map.set_size(current_cols as usize * 2, current_rows as usize * 4);
             map.fit_world();
 
             // Render initial frame immediately
@@ -128,7 +132,8 @@ fn ensure_started() {
                             if c != current_cols || r != current_rows {
                                 current_cols = c;
                                 current_rows = r;
-                                map.set_size_from_terminal(c, r);
+                                // Direct pixel size: cols*2 wide, rows*4 tall
+                                map.set_size(c as usize * 2, r as usize * 4);
                                 map.fit_world();
                                 needs_render = true;
                             }
