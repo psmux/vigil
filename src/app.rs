@@ -201,14 +201,12 @@ impl App {
     pub fn new() -> Self {
         let hostname = sysinfo::System::host_name().unwrap_or_else(|| "unknown".into());
 
-        // Collect services and interfaces eagerly so the first frame is populated
-        let services = data::system::collect_services();
-        let interfaces = data::system::collect_interfaces();
-
-        // Eagerly collect network topology info
-        let gateway = data::discovery::get_gateway();
-        let dns_servers = data::discovery::get_dns_servers();
-        let neighbors = data::discovery::discover_neighbors();
+        // Defer heavy collection to background thread — first frame renders instantly
+        let services = Vec::new();
+        let interfaces = Vec::new();
+        let gateway = None;
+        let dns_servers = Vec::new();
+        let neighbors = Vec::new();
 
         Self {
             view: View::CommandCenter,
@@ -276,7 +274,7 @@ impl App {
             wire_auto_scroll: true,
             wire_detail_expanded: true,
 
-            system_collector: Some(data::system::SystemCollector::new()),
+            system_collector: None, // defer sysinfo init to first tick
             tick_start: Instant::now(),
         }
     }
@@ -357,6 +355,13 @@ impl App {
                 DataUpdate::DnsResolved(ip, name) => {
                     self.dns_cache.insert(ip, name);
                 }
+                DataUpdate::Topology { gateway, dns_servers, neighbors, services, interfaces } => {
+                    self.gateway = gateway;
+                    self.dns_servers = dns_servers;
+                    self.neighbors = neighbors;
+                    self.services = services;
+                    self.interfaces = interfaces;
+                }
             }
         }
 
@@ -395,6 +400,10 @@ impl App {
 
         // ── System info refresh (every 5 ticks) ─────────────────────
         if self.tick_count % 5 == 0 {
+            // Lazily initialize SystemCollector on first use (deferred from App::new())
+            if self.system_collector.is_none() {
+                self.system_collector = Some(data::system::SystemCollector::new());
+            }
             if let Some(mut collector) = self.system_collector.take() {
                 let (cpu, memory, disks) = collector.refresh();
                 self.cpu = cpu;
@@ -404,11 +413,7 @@ impl App {
             }
         }
 
-        // ── Services and interfaces (every 10 ticks) ────────────────
-        if self.tick_count % 10 == 0 {
-            self.services = data::system::collect_services();
-            self.interfaces = data::system::collect_interfaces();
-        }
+        // (Services and interfaces now collected by background topology thread)
 
         // ── Port analysis (every 3 ticks) ───────────────────────────
         if self.tick_count % 3 == 0 {
@@ -436,6 +441,24 @@ impl App {
         for ip in new_ips {
             if let Some(geo) = data::geoip::lookup(ip) {
                 self.geoip_cache.insert(ip, geo);
+            }
+        }
+
+        // ── Send unresolved IPs to DNS resolver thread ──────────────
+        {
+            use crate::DNS_SENDER;
+            if let Ok(guard) = DNS_SENDER.lock() {
+                if let Some(ref sender) = *guard {
+                    for conn in &self.connections {
+                        let ip = conn.remote_addr.ip();
+                        if !data::geoip::is_private_ip(ip)
+                            && !ip.is_loopback()
+                            && !self.dns_cache.contains_key(&ip)
+                        {
+                            let _ = sender.send(ip);
+                        }
+                    }
+                }
             }
         }
 
@@ -492,12 +515,7 @@ impl App {
             self.server_info = servers::detect_servers(&self.ports);
         }
 
-        // ── Network topology refresh (every 30 ticks) ───────────────
-        if self.tick_count % 30 == 0 {
-            self.gateway = data::discovery::get_gateway();
-            self.dns_servers = data::discovery::get_dns_servers();
-            self.neighbors = data::discovery::discover_neighbors();
-        }
+        // (Network topology now refreshed by background topology thread)
 
         // ── Security score (every 5 ticks) ──────────────────────────
         if self.tick_count % 5 == 0 {
@@ -510,12 +528,14 @@ impl App {
             }
         }
 
-        // ── Wire tracking (every tick — detect new/closed/state changes) ──
-        self.wire_tracker.process(
-            &self.connections,
-            &self.geoip_cache,
-            &self.dns_cache,
-        );
+        // ── Wire tracking (every 2 ticks) ──────────────────────────
+        if self.tick_count % 2 == 0 {
+            self.wire_tracker.process(
+                &self.connections,
+                &self.geoip_cache,
+                &self.dns_cache,
+            );
+        }
 
         // ── Outbound tracking (every 2 ticks) ────────────────────────
         if self.tick_count % 2 == 0 {

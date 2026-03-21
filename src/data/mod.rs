@@ -29,6 +29,13 @@ pub enum DataUpdate {
     BannedIps(HashSet<IpAddr>),
     FirewallRules(Vec<FirewallRule>, bool), // rules + default_deny
     DnsResolved(IpAddr, String),
+    Topology {
+        gateway: Option<IpAddr>,
+        dns_servers: Vec<IpAddr>,
+        neighbors: Vec<discovery::LanDevice>,
+        services: Vec<ServiceStatus>,
+        interfaces: Vec<NetworkInterface>,
+    },
 }
 
 // ─── Connection ────────────────────────────────────────────────────

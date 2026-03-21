@@ -9,8 +9,13 @@ mod ui;
 mod widgets;
 
 use std::io;
-use std::sync::mpsc;
+use std::net::IpAddr;
+use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Global sender for DNS resolution requests — populated by spawn_data_threads().
+pub(crate) static DNS_SENDER: std::sync::LazyLock<Mutex<Option<mpsc::Sender<IpAddr>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
 
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event},
@@ -146,18 +151,20 @@ fn spawn_data_threads(tx: mpsc::Sender<DataUpdate>, _config: &VigilConfig) {
         });
     }
 
-    // 6. DNS resolver — reverse-lookups for remote IPs every 5s
+    // 6. DNS resolver — reverse-lookups for remote IPs via dedicated channel
     {
         let tx = tx.clone();
+        let (dns_tx, dns_rx) = mpsc::channel::<std::net::IpAddr>();
+        // Store the dns sender in a global so tick() can send IPs to resolve
+        DNS_SENDER.lock().unwrap().replace(dns_tx);
         std::thread::spawn(move || {
             use std::collections::HashSet;
             use std::net::IpAddr;
             let mut resolved: HashSet<IpAddr> = HashSet::new();
             loop {
-                let conns = data::connections::collect_connections();
-                for conn in &conns {
-                    let ip = conn.remote_addr.ip();
-                    if !data::geoip::is_private_ip(ip) && !ip.is_loopback() && !resolved.contains(&ip) {
+                // Drain all pending IPs from the channel
+                while let Ok(ip) = dns_rx.try_recv() {
+                    if !resolved.contains(&ip) {
                         if let Ok(hostname) = dns_lookup::lookup_addr(&ip) {
                             if hostname != ip.to_string() {
                                 let _ = tx.send(DataUpdate::DnsResolved(ip, hostname));
@@ -166,8 +173,28 @@ fn spawn_data_threads(tx: mpsc::Sender<DataUpdate>, _config: &VigilConfig) {
                         resolved.insert(ip);
                     }
                 }
-                std::thread::sleep(Duration::from_secs(5));
+                std::thread::sleep(Duration::from_millis(500));
             }
+        });
+    }
+
+    // 7. Topology/discovery — services, interfaces, gateway, DNS servers, neighbors every 30s
+    {
+        let tx = tx.clone();
+        std::thread::spawn(move || loop {
+            let gateway = data::discovery::get_gateway();
+            let dns_servers = data::discovery::get_dns_servers();
+            let neighbors = data::discovery::discover_neighbors();
+            let services = data::system::collect_services();
+            let interfaces = data::system::collect_interfaces();
+            let _ = tx.send(DataUpdate::Topology {
+                gateway,
+                dns_servers,
+                neighbors,
+                services,
+                interfaces,
+            });
+            std::thread::sleep(Duration::from_secs(30));
         });
     }
 }

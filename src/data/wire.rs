@@ -114,8 +114,8 @@ impl WireTracker {
     pub fn new() -> Self {
         Self {
             prev_connections: HashMap::new(),
-            events: VecDeque::with_capacity(2048),
-            max_events: 2000,
+            events: VecDeque::with_capacity(512),
+            max_events: 500,
             seq_counter: 0,
             stats: WireStats::default(),
         }

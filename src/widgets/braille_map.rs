@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use ratatui::{
     layout::Rect,
@@ -57,6 +57,7 @@ const LABEL_COLOR: Color = Color::Rgb(25, 35, 55);
 ///
 /// Each cell tracks a priority value so that higher-priority draws (dots,
 /// glows) overwrite lower-priority ones (grid lines, coastlines).
+#[derive(Clone)]
 pub struct BrailleCanvas {
     width: usize,
     height: usize,
@@ -584,6 +585,61 @@ fn apply_land_fill(canvas: &mut BrailleCanvas) {
     }
 }
 
+// ─── Base Map Cache ────────────────────────────────────────────────
+//
+// The base map (grid, coastlines, borders, land fill, labels) is 100%
+// static — it only depends on the terminal dimensions (w, h). Drawing
+// 3700+ polylines with Bresenham every frame is the #1 rendering
+// bottleneck. Cache the base canvas and clone it per frame, only
+// adding the dynamic dots to the clone.
+
+/// Cached base map: (width, height, canvas).
+static BASE_MAP_CACHE: Mutex<Option<(usize, usize, BrailleCanvas)>> = Mutex::new(None);
+
+/// Get or create the cached base map canvas for the given dimensions.
+fn get_base_map(w: usize, h: usize) -> BrailleCanvas {
+    let mut cache = BASE_MAP_CACHE.lock().unwrap();
+
+    // Return cached version if dimensions match
+    if let Some((cw, ch, ref canvas)) = *cache {
+        if cw == w && ch == h {
+            return canvas.clone();
+        }
+    }
+
+    // Build new base map — this is expensive but only happens on resize
+    let mut canvas = BrailleCanvas::new(w, h);
+    let px_w = canvas.px_width();
+    let px_h = canvas.px_height();
+
+    // Grid
+    draw_grid(&mut canvas, px_w, px_h);
+
+    // Coastlines and borders
+    let coastlines = world_coastlines();
+
+    if !coastlines.borders.is_empty() {
+        draw_coastline_layer(&mut canvas, &coastlines.borders, BORDER_COLOR, 1, px_w, px_h);
+    }
+    draw_coastline_layer(&mut canvas, &coastlines.secondary, COASTLINE_SECONDARY, 2, px_w, px_h);
+    draw_coastline_layer(&mut canvas, &coastlines.primary, COASTLINE_PRIMARY, 2, px_w, px_h);
+
+    // Land fill
+    apply_land_fill(&mut canvas);
+
+    // Continent labels
+    for &(label, lon, lat) in CONTINENT_LABELS {
+        let (col, row) = project_cell(lon, lat, w, h);
+        let offset = label.len() / 2;
+        let col = col.saturating_sub(offset);
+        canvas.place_text(col, row, label, LABEL_COLOR, 0);
+    }
+
+    // Store in cache
+    *cache = Some((w, h, canvas.clone()));
+    canvas
+}
+
 // ─── Main Draw Function ─────────────────────────────────────────────
 
 /// Draw a full world map with Mercator projection, coastlines, and
@@ -617,84 +673,34 @@ pub fn draw_world_map(
     let w = inner.width as usize;
     let h = inner.height as usize;
 
-    let mut canvas = BrailleCanvas::new(w, h);
+    // Get cached base map (grid + coastlines + borders + labels)
+    // This avoids redrawing 3700+ polylines every frame
+    let mut canvas = get_base_map(w, h);
     let px_w = canvas.px_width();
     let px_h = canvas.px_height();
 
-    // ── Draw grid (lowest priority) ─────────────────────────────
-    draw_grid(&mut canvas, px_w, px_h);
-
-    // ── Draw coastlines and borders — three layers ─────────────
-    let coastlines = world_coastlines();
-
-    // Country borders (lowest coastline priority — subtle)
-    if !coastlines.borders.is_empty() {
-        draw_coastline_layer(
-            &mut canvas,
-            &coastlines.borders,
-            BORDER_COLOR,
-            1,
-            px_w,
-            px_h,
-        );
-    }
-
-    // Secondary coastlines (lower priority, dimmer)
-    draw_coastline_layer(
-        &mut canvas,
-        &coastlines.secondary,
-        COASTLINE_SECONDARY,
-        2,
-        px_w,
-        px_h,
-    );
-
-    // Primary coastlines on top (highest coastline priority, brighter)
-    draw_coastline_layer(
-        &mut canvas,
-        &coastlines.primary,
-        COASTLINE_PRIMARY,
-        2,
-        px_w,
-        px_h,
-    );
-
-    // ── Land fill (subtle background tint for land masses) ─────
-    apply_land_fill(&mut canvas);
-
-    // ── Continent labels ────────────────────────────────────────
-    for &(label, lon, lat) in CONTINENT_LABELS {
-        let (col, row) = project_cell(lon, lat, w, h);
-        // Center the label approximately
-        let offset = label.len() / 2;
-        let col = col.saturating_sub(offset);
-        canvas.place_text(col, row, label, LABEL_COLOR, 0);
-    }
-
-    // Draw connection dots — single bright pixel, preserves map shape
+    // Only the dots are dynamic — draw them on the cloned canvas
     for dot in dots {
         let (px, py) = project(dot.lon, dot.lat, px_w, px_h);
         let (jx, jy) = ip_jitter(dot.jitter_seed);
         let fx = (px + jx).clamp(0, px_w as i32 - 1);
         let fy = (py + jy).clamp(0, px_h as i32 - 1);
 
-        // Brightness pulse for attacks — single pixel only
         let color = if dot.pulsing {
             match animation_frame % 4 {
-                0 => Color::Rgb(255, 80, 80),   // bright red
+                0 => Color::Rgb(255, 80, 80),
                 1 => Color::Rgb(200, 50, 50),
-                2 => Color::Rgb(130, 30, 30),   // dim red
+                2 => Color::Rgb(130, 30, 30),
                 _ => Color::Rgb(200, 50, 50),
             }
         } else {
             dot.color
         };
 
-        // ONE pixel — that is all. No circles, no rings, no glow.
         canvas.set_dot_pri(fx, fy, color, 4);
     }
 
-    // ── Render canvas to paragraph ──────────────────────────────
+    // Render
     let lines = canvas.render();
     let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::BG));
     f.render_widget(paragraph, inner);
