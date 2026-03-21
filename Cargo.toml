@@ -22,6 +22,7 @@ anyhow = "1"
 dirs = "5"
 terminalmap = { git = "https://github.com/psmux/TerminalMap.git", branch = "master" }
 tokio = { version = "1", features = ["rt", "sync", "macros"] }
+ansi-to-tui = "7"
 
 [profile.release]
 opt-level = 3
