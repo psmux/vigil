@@ -116,7 +116,18 @@ impl TcpState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Protocol { Tcp, Udp }
+pub enum Protocol { Tcp, Udp, Icmp, Raw }
+
+impl Protocol {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Tcp => "TCP",
+            Self::Udp => "UDP",
+            Self::Icmp => "ICMP",
+            Self::Raw => "RAW",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction { Inbound, Outbound, Local, Unknown }

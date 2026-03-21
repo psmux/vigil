@@ -133,10 +133,7 @@ fn draw_live_ticker(f: &mut Frame, app: &App, area: Rect) {
         let proto_label = if event.service != AppProtocol::Other {
             event.service.label()
         } else {
-            match event.protocol {
-                crate::data::Protocol::Tcp => "TCP",
-                crate::data::Protocol::Udp => "UDP",
-            }
+            event.protocol.label()
         };
         let proto_color = if event.service != AppProtocol::Other {
             event.service.color()

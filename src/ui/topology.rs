@@ -342,7 +342,7 @@ fn draw_remote_hosts(f: &mut Frame, app: &App, area: Rect, scroll: usize) {
                 TcpState::TimeWait => "TW",
                 _ => "TCP",
             },
-            crate::data::Protocol::Udp => "UDP",
+            other => other.label(),
         };
         *entry.2.entry(proto.to_string()).or_insert(0) += 1;
     }

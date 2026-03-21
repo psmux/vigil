@@ -15,6 +15,8 @@ pub fn collect_listening_ports(connections: &[Connection]) -> Vec<ListeningPort>
         match p {
             Protocol::Tcp => 0,
             Protocol::Udp => 1,
+            Protocol::Icmp => 2,
+            Protocol::Raw => 3,
         }
     };
     let mut listeners: HashMap<(u16, u8), &Connection> = HashMap::new();

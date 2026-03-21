@@ -170,6 +170,10 @@ impl WireTracker {
                         _ => {}
                     }
                 }
+                _ => {
+                    // ICMP, Raw — count as UDP-like for stats
+                    self.stats.udp_count += 1;
+                }
             }
         }
 

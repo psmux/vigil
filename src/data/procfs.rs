@@ -43,6 +43,20 @@ pub fn parse_proc_net_udp(ipv6: bool) -> Vec<RawSocket> {
     parse_proc_net_socket_file(path, ipv6)
 }
 
+/// Parse `/proc/net/icmp` (ipv6=false) or `/proc/net/icmp6` (ipv6=true).
+/// Same format as tcp/udp — captures ping and other ICMP traffic.
+pub fn parse_proc_net_icmp(ipv6: bool) -> Vec<RawSocket> {
+    let path = if ipv6 { "/proc/net/icmp6" } else { "/proc/net/icmp" };
+    parse_proc_net_socket_file(path, ipv6)
+}
+
+/// Parse `/proc/net/raw` (ipv6=false) or `/proc/net/raw6` (ipv6=true).
+/// Captures raw socket traffic (traceroute, custom protocols, etc.).
+pub fn parse_proc_net_raw(ipv6: bool) -> Vec<RawSocket> {
+    let path = if ipv6 { "/proc/net/raw6" } else { "/proc/net/raw" };
+    parse_proc_net_socket_file(path, ipv6)
+}
+
 /// Shared parser for /proc/net/{tcp,tcp6,udp,udp6}.
 ///
 /// Each line (after the header) looks like:

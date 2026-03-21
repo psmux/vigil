@@ -279,7 +279,7 @@ fn draw_detail_pane(f: &mut Frame, app: &App, area: Rect) {
                 WireEventKind::ConnectionClosed => "CLOSE",
                 WireEventKind::StateChange { .. } => "STATE",
             };
-            let proto = if ev.protocol == Protocol::Tcp { "TCP" } else { "UDP" };
+            let proto = ev.protocol.label();
             let proc = ev.process_name.as_deref().unwrap_or("?");
             lines.push(Line::from(vec![
                 Span::styled("  ", dim),
@@ -291,7 +291,7 @@ fn draw_detail_pane(f: &mut Frame, app: &App, area: Rect) {
         }
         Some(ev) => {
             // Expanded: full Wireshark-style protocol tree
-            let proto = if ev.protocol == Protocol::Tcp { "TCP" } else { "UDP" };
+            let proto = ev.protocol.label();
             let proc = ev.process_name.as_deref().unwrap_or("unknown");
             let kind_str = match &ev.kind {
                 WireEventKind::NewConnection => "New Connection",
@@ -434,12 +434,12 @@ fn draw_bytes_pane(f: &mut Frame, app: &App, area: Rect) {
     let mut data_lines: Vec<(String, String, String)> = Vec::new();
 
     // Row 1: Protocol + State
-    let proto = if ev.protocol == Protocol::Tcp { "TCP" } else { "UDP" };
+    let proto = ev.protocol.label();
     let state_hex = format!("{:02x}", ev.state as u8);
     data_lines.push((
         "0000".into(),
         format!("{:<24}", format!("{:02x} {:02x} {:02x} {} {:02x} {:02x}",
-            if ev.protocol == Protocol::Tcp { 0x06 } else { 0x11 },
+            match ev.protocol { Protocol::Tcp => 0x06, Protocol::Udp => 0x11, Protocol::Icmp => 0x01, Protocol::Raw => 0xff },
             ev.state as u8,
             match ev.direction { Direction::Inbound => 0x01, Direction::Outbound => 0x02, Direction::Local => 0x03, _ => 0x00 },
             format_port_hex(ev.local_addr.port()),

@@ -26,6 +26,18 @@ pub fn collect_connections() -> Vec<Connection> {
     for s in procfs::parse_proc_net_udp(true) {
         raw_sockets.push((s, Protocol::Udp, true));
     }
+    for s in procfs::parse_proc_net_icmp(false) {
+        raw_sockets.push((s, Protocol::Icmp, false));
+    }
+    for s in procfs::parse_proc_net_icmp(true) {
+        raw_sockets.push((s, Protocol::Icmp, true));
+    }
+    for s in procfs::parse_proc_net_raw(false) {
+        raw_sockets.push((s, Protocol::Raw, false));
+    }
+    for s in procfs::parse_proc_net_raw(true) {
+        raw_sockets.push((s, Protocol::Raw, true));
+    }
 
     let inode_map = procfs::build_inode_pid_map();
     let mut connections = Vec::with_capacity(raw_sockets.len());
