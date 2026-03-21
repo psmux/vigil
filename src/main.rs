@@ -56,8 +56,16 @@ fn main() -> anyhow::Result<()> {
     // Main event loop
     let tick_rate = Duration::from_millis(config.tick_rate_ms);
     let mut last_tick = Instant::now();
+    let mut prev_view = app.view;
 
     loop {
+        // If we just left Attack Radar, force a full terminal redraw
+        // to clear any ANSI content that ratatui's diff buffer doesn't know about.
+        if prev_view == app::View::AttackRadar && app.view != app::View::AttackRadar {
+            terminal.clear()?;
+        }
+        prev_view = app.view;
+
         // Draw
         terminal.draw(|f| ui::draw(f, &app))?;
 
