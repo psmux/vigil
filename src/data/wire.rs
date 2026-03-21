@@ -74,6 +74,12 @@ pub struct WireEvent {
     pub tx_bps: f64,
     pub rx_bps: f64,
     pub is_threat: bool,
+    /// Bytes in transmit queue at capture time.
+    pub tx_queue: u32,
+    /// Bytes in receive queue at capture time.
+    pub rx_queue: u32,
+    /// TCP retransmit count.
+    pub retransmits: u32,
 }
 
 // ─── Wire protocol stats ────────────────────────────────────────────
@@ -191,6 +197,9 @@ impl WireTracker {
                     tx_bps: conn.tx_bps,
                     rx_bps: conn.rx_bps,
                     is_threat: conn.is_threat,
+                    tx_queue: conn.tx_queue,
+                    rx_queue: conn.rx_queue,
+                    retransmits: conn.retransmits,
                 });
                 self.stats.new_this_tick += 1;
             }
@@ -221,6 +230,9 @@ impl WireTracker {
                         tx_bps: conn.tx_bps,
                         rx_bps: conn.rx_bps,
                         is_threat: conn.is_threat,
+                        tx_queue: conn.tx_queue,
+                        rx_queue: conn.rx_queue,
+                        retransmits: conn.retransmits,
                     });
                     self.stats.state_changes_this_tick += 1;
                 }
@@ -256,6 +268,9 @@ impl WireTracker {
                     tx_bps: 0.0,
                     rx_bps: 0.0,
                     is_threat: false,
+                    tx_queue: 0,
+                    rx_queue: 0,
+                    retransmits: 0,
                 });
                 self.stats.closed_this_tick += 1;
             }

@@ -18,6 +18,14 @@ pub struct RawSocket {
     pub remote_port: u16,
     pub state: u8,
     pub inode: u64,
+    /// Transmit queue size in bytes (from tx_queue:rx_queue field).
+    pub tx_queue: u32,
+    /// Receive queue size in bytes.
+    pub rx_queue: u32,
+    /// Retransmit count.
+    pub retransmits: u32,
+    /// UID of socket owner.
+    pub uid: u32,
 }
 
 // ─── /proc/net/tcp and /proc/net/tcp6 ───────────────────────────────
@@ -70,6 +78,13 @@ fn parse_proc_net_socket_file(path: &str, ipv6: bool) -> Vec<RawSocket> {
         let state = u8::from_str_radix(fields[3], 16).unwrap_or(0);
         let inode = fields[9].parse::<u64>().unwrap_or(0);
 
+        // fields[4] = "tx_queue:rx_queue" (hex:hex)
+        let (tx_queue, rx_queue) = parse_queue_pair(fields[4]);
+        // fields[6] = retransmit count (decimal)
+        let retransmits = fields[6].parse::<u32>().unwrap_or(0);
+        // fields[7] = uid (decimal)
+        let uid = fields[7].parse::<u32>().unwrap_or(0);
+
         results.push(RawSocket {
             local_addr,
             local_port,
@@ -77,9 +92,27 @@ fn parse_proc_net_socket_file(path: &str, ipv6: bool) -> Vec<RawSocket> {
             remote_port,
             state,
             inode,
+            tx_queue,
+            rx_queue,
+            retransmits,
+            uid,
         });
     }
     results
+}
+
+/// Parse "HEX:HEX" tx_queue:rx_queue pair.
+fn parse_queue_pair(s: &str) -> (u32, u32) {
+    let mut parts = s.split(':');
+    let tx = parts
+        .next()
+        .and_then(|h| u32::from_str_radix(h, 16).ok())
+        .unwrap_or(0);
+    let rx = parts
+        .next()
+        .and_then(|h| u32::from_str_radix(h, 16).ok())
+        .unwrap_or(0);
+    (tx, rx)
 }
 
 /// Parse "HEXADDR:HEXPORT" into (u128, u16).

@@ -81,6 +81,9 @@ pub fn collect_connections() -> Vec<Connection> {
             direction,
             rx_bps: 0.0,
             tx_bps: 0.0,
+            tx_queue: raw.tx_queue,
+            rx_queue: raw.rx_queue,
+            retransmits: raw.retransmits,
         });
     }
 

@@ -47,6 +47,12 @@ pub struct Connection {
     pub direction: Direction,
     pub rx_bps: f64,
     pub tx_bps: f64,
+    /// Bytes queued for sending.
+    pub tx_queue: u32,
+    /// Bytes queued for receiving.
+    pub rx_queue: u32,
+    /// TCP retransmit count.
+    pub retransmits: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

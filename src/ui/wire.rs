@@ -1,12 +1,8 @@
 //! Wire view (View 0) — Wireshark-style three-pane network monitor.
 //!
-//! Replicates Wireshark's classic layout:
-//!   Top pane:    Packet/event list with color-coded rows, selectable cursor
-//!   Middle pane: Detail breakdown of the selected event (protocol layers)
-//!   Bottom pane: Connection metadata (process, geo, bandwidth, timestamps)
-//!
-//! Auto-scrolls to newest events in live mode. Scrolling up pauses auto-scroll.
-//! Press 'G' to jump to latest / resume auto-scroll.
+//! Top:    Packet list — color-coded rows, selectable cursor, auto-scroll
+//! Middle: Protocol detail — expandable tree showing all layers of selected event
+//! Bottom: Packet data — hex-dump style view of TCP internals + connection metadata
 
 use ratatui::layout::{Constraint, Direction as LayoutDir, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -18,108 +14,93 @@ use crate::app::App;
 use crate::data::wire::{WireEvent, WireEventKind};
 use crate::data::{Direction, Protocol, TcpState};
 use crate::data::protocols::AppProtocol;
-use crate::format::{format_bps, format_time_ago};
+use crate::format::{format_bps, format_bytes, format_time_ago};
 use crate::theme;
 
-// ─── Wireshark-inspired row colors (full row background) ────────────
-// These mimic Wireshark's default coloring rules where each protocol
-// gets a distinct background tint so you can visually scan traffic.
-
-/// TCP SYN/handshake — light gray (Wireshark: light purple)
+// ─── Wireshark row background colors by protocol ────────────────────
 const BG_TCP_SYN: Color = Color::Rgb(18, 16, 28);
-/// TCP established normal — subtle dark (Wireshark: light purple)
 const BG_TCP: Color = Color::Rgb(12, 14, 26);
-/// TCP FIN/RST/close — darker tint (Wireshark: dark gray)
 const BG_TCP_CLOSE: Color = Color::Rgb(20, 12, 12);
-/// HTTP/HTTPS — green tint (Wireshark: green)
 const BG_HTTP: Color = Color::Rgb(10, 20, 14);
-/// DNS — blue tint (Wireshark: blue)
 const BG_DNS: Color = Color::Rgb(10, 14, 24);
-/// SSH — yellow tint (Wireshark: light yellow)
 const BG_SSH: Color = Color::Rgb(18, 18, 10);
-/// Database (PostgreSQL, MySQL, Redis, MongoDB)
 const BG_DB: Color = Color::Rgb(16, 12, 20);
-/// Threat/bad — red tint (Wireshark: red for errors)
 const BG_THREAT: Color = Color::Rgb(30, 8, 8);
-/// Selected row highlight
 const BG_SELECTED: Color = Color::Rgb(25, 35, 60);
-/// Default
 const BG_DEFAULT: Color = Color::Rgb(10, 13, 24);
 
-/// Draw the Wire view.
-///
-/// Wireshark three-pane layout:
-/// ```text
-/// ┌─ Packet List ──────────────────────────────────────────────────┐
-/// │ No.  Time     Source              Destination         Proto Inf│
-/// │  1   0.000    192.168.1.5:43210   142.250.80.4:443    TLS  [SY│ ← selected (highlighted)
-/// │  2   0.034    142.250.80.4:443    192.168.1.5:43210   TLS  [SY│
-/// │  3   2.101    192.168.1.5:52100   8.8.8.8:53          DNS  Sta│
-/// ├─ Event Detail ─────────────────────────────────────────────────┤
-/// │ ▸ Event: New Connection (TCP SYN_SENT)                        │
-/// │ ▸ Network: 192.168.1.5:43210 → 142.250.80.4:443 (HTTPS)      │
-/// │ ▸ Process: chrome (PID 14523)                                 │
-/// │ ▸ GeoIP: US — United States (Mountain View, CA)               │
-/// ├─ Status ───────────────────────────────────────────────────────┤
-/// │ Live ● 1,234 events | TCP:89 UDP:23 | ↑12.4KB/s ↓45.2KB/s    │
-/// └────────────────────────────────────────────────────────────────┘
-/// ```
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
+    // Wireshark three-pane: adjust ratio based on detail expanded
+    let constraints = if app.wire_detail_expanded {
+        vec![
+            Constraint::Percentage(45),
+            Constraint::Percentage(30),
+            Constraint::Percentage(22),
+            Constraint::Length(3),
+        ]
+    } else {
+        vec![
+            Constraint::Percentage(75),
+            Constraint::Length(3), // collapsed detail = just title
+            Constraint::Percentage(0),
+            Constraint::Length(3),
+        ]
+    };
+
     let rows = Layout::default()
         .direction(LayoutDir::Vertical)
-        .constraints([
-            Constraint::Percentage(60),  // packet list
-            Constraint::Percentage(30),  // detail pane
-            Constraint::Length(3),       // status bar
-        ])
+        .constraints(constraints)
         .split(area);
 
     draw_packet_list(f, app, rows[0]);
     draw_detail_pane(f, app, rows[1]);
-    draw_status_bar(f, app, rows[2]);
+    if app.wire_detail_expanded {
+        draw_bytes_pane(f, app, rows[2]);
+    }
+    let status_area = if app.wire_detail_expanded { rows[3] } else { rows[3] };
+    draw_status_bar(f, app, status_area);
 }
 
-// ─── Packet List Pane (Top) ─────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// PANE 1: PACKET LIST
+// ═══════════════════════════════════════════════════════════════════
 
 fn draw_packet_list(f: &mut Frame, app: &App, area: Rect) {
-    let live_indicator = if app.wire_auto_scroll { " \u{25cf} Live" } else { " \u{25cb} Paused" };
+    let live_str = if app.wire_auto_scroll { " \u{25cf} Live" } else { " \u{25cb} Scroll" };
     let live_color = if app.wire_auto_scroll { Color::Rgb(80, 220, 120) } else { Color::Rgb(200, 160, 60) };
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
         .title(vec![
-            Span::styled(
-                " \u{26a1} Wire ",
-                Style::default().fg(Color::Rgb(60, 220, 180)).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(live_indicator, Style::default().fg(live_color)),
+            Span::styled(" \u{26a1} Wire ", Style::default().fg(Color::Rgb(60, 220, 180)).add_modifier(Modifier::BOLD)),
+            Span::styled(live_str, Style::default().fg(live_color)),
         ])
         .style(Style::default().bg(theme::BG));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
+    if inner.width < 60 || inner.height < 3 { return; }
 
-    if inner.width < 60 || inner.height < 3 {
-        return;
-    }
+    let w = inner.width as usize;
 
-    // Column header — Wireshark style
-    let header = build_header(inner.width as usize);
+    // Wireshark-style column header
+    let header = Line::from(Span::styled(
+        truncpad(&format!(
+            " {:<6} {:<10} {:<21} {:<21} {:<8} {:<5} {}",
+            "No.", "Time", "Source", "Destination", "Protocol", "Len", "Info"
+        ), w),
+        Style::default().fg(Color::Rgb(140, 150, 170)).bg(Color::Rgb(16, 20, 35)).add_modifier(Modifier::BOLD),
+    ));
 
     let events = app.wire_tracker.events();
-    let visible_rows = (inner.height as usize).saturating_sub(1); // minus header
+    let visible = (inner.height as usize).saturating_sub(1);
     let total = events.len();
-
-    // Determine scroll position
-    let offset = if app.wire_auto_scroll {
-        0 // newest first, show from top
-    } else {
-        let max_scroll = total.saturating_sub(visible_rows);
-        app.wire_selected.min(max_scroll)
+    let offset = if app.wire_auto_scroll { 0 } else {
+        app.wire_selected.saturating_sub(visible / 2).min(total.saturating_sub(visible))
     };
 
-    let mut lines: Vec<Line> = Vec::with_capacity(visible_rows + 1);
+    let mut lines: Vec<Line> = Vec::with_capacity(visible + 1);
     lines.push(header);
 
     if events.is_empty() {
@@ -128,231 +109,214 @@ fn draw_packet_list(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(theme::TEXT_DIM),
         )));
     } else {
-        for (i, event) in events.iter().skip(offset).take(visible_rows).enumerate() {
-            let is_selected = (offset + i) == app.wire_selected;
-            lines.push(build_packet_row(event, app, inner.width as usize, is_selected));
+        for (i, ev) in events.iter().skip(offset).take(visible).enumerate() {
+            let selected = (offset + i) == app.wire_selected;
+            lines.push(build_packet_row(ev, app, w, selected));
         }
     }
 
-    let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::BG));
-    f.render_widget(paragraph, inner);
+    f.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::BG)), inner);
 }
 
-fn build_header(width: usize) -> Line<'static> {
-    let h = format!(
-        " {:<6} {:<10} {:<22} {:<22} {:<7} {}",
-        "No.", "Time", "Source", "Destination", "Proto", "Info"
-    );
-    let truncated = if h.len() > width { h[..width].to_string() } else { h };
-    Line::from(Span::styled(
-        truncated,
-        Style::default()
-            .fg(Color::Rgb(140, 150, 170))
-            .bg(Color::Rgb(16, 20, 35))
-            .add_modifier(Modifier::BOLD),
-    ))
-}
-
-fn build_packet_row<'a>(event: &WireEvent, app: &App, width: usize, selected: bool) -> Line<'a> {
-    // Row background color — protocol-based like Wireshark
-    let row_bg = if selected {
-        BG_SELECTED
-    } else if event.is_threat {
-        BG_THREAT
-    } else {
-        match &event.kind {
+fn build_packet_row<'a>(ev: &WireEvent, _app: &App, width: usize, selected: bool) -> Line<'a> {
+    let row_bg = if selected { BG_SELECTED }
+        else if ev.is_threat { BG_THREAT }
+        else { match &ev.kind {
             WireEventKind::ConnectionClosed => BG_TCP_CLOSE,
-            _ => match event.service {
+            _ => match ev.service {
                 AppProtocol::HTTP | AppProtocol::HTTPS => BG_HTTP,
                 AppProtocol::DNS => BG_DNS,
                 AppProtocol::SSH => BG_SSH,
                 AppProtocol::PostgreSQL | AppProtocol::MySQL | AppProtocol::Redis | AppProtocol::MongoDB => BG_DB,
-                _ => match &event.kind {
-                    WireEventKind::NewConnection if event.state == TcpState::SynSent || event.state == TcpState::SynRecv => BG_TCP_SYN,
-                    _ => BG_DEFAULT,
-                }
+                _ if matches!(&ev.kind, WireEventKind::NewConnection) && (ev.state == TcpState::SynSent || ev.state == TcpState::SynRecv) => BG_TCP_SYN,
+                _ => BG_DEFAULT,
             }
-        }
-    };
+        }};
 
-    // No. column
-    let seq = format!(" {:<6}", event.seq);
+    let sel = if selected { Modifier::BOLD } else { Modifier::empty() };
+    let s = |fg: Color| Style::default().fg(fg).bg(row_bg).add_modifier(sel);
 
-    // Time — relative seconds since event (like Wireshark's relative time)
-    let time_str = event.timestamp.format("%H:%M:%S").to_string();
-    let time_display = format!("{:<10}", time_str);
-
-    // Source
-    let src = if event.direction == Direction::Outbound || event.direction == Direction::Local {
-        format!("{}", event.local_addr)
+    // No.
+    let seq = format!(" {:<6}", ev.seq);
+    // Time
+    let time = format!("{:<10}", ev.timestamp.format("%H:%M:%S"));
+    // Source / Destination — show like Wireshark (src→dst based on who initiated)
+    let (src, dst) = if ev.direction == Direction::Outbound || ev.direction == Direction::Local {
+        (format!("{}", ev.local_addr), format_dst(ev))
     } else {
-        format!("{}", event.remote_addr)
+        (format!("{}", ev.remote_addr), format!("{}", ev.local_addr))
     };
-    let src_display = truncpad(&src, 22);
+    let src_d = truncpad(&src, 21);
+    let dst_d = truncpad(&dst, 21);
+    // Protocol
+    let proto = format!("{:<8}", ev.service.label());
+    // Length (tx_queue + rx_queue as byte estimate)
+    let len = ev.tx_queue + ev.rx_queue;
+    let len_str = format!("{:<5}", if len > 0 { format!("{}", len) } else { "-".into() });
+    // Info — Wireshark-style with TCP flags and content preview
+    let info = build_info(ev);
 
-    // Destination
-    let dst_raw = if event.direction == Direction::Outbound || event.direction == Direction::Local {
-        // Show hostname if available for outbound destinations
-        event.hostname.as_deref()
-            .map(|h| {
-                let port = event.remote_addr.port();
-                if h.len() > 16 { format!("{}..:{}", &h[..16], port) }
-                else { format!("{}:{}", h, port) }
-            })
-            .unwrap_or_else(|| format!("{}", event.remote_addr))
-    } else {
-        format!("{}", event.local_addr)
-    };
-    let dst_display = truncpad(&dst_raw, 22);
-
-    // Protocol — show service name, color by protocol
-    let proto_label = event.service.label();
-    let proto_display = format!("{:<7}", proto_label);
-    let proto_color = event.service.color();
-
-    // Info column — Wireshark-style description with TCP flags
-    let info = build_info_string(event);
-
-    let sel_mod = if selected { Modifier::BOLD } else { Modifier::empty() };
-
-    let spans: Vec<Span<'a>> = vec![
-        Span::styled(seq, Style::default().fg(Color::Rgb(70, 80, 100)).bg(row_bg).add_modifier(sel_mod)),
-        Span::styled(time_display, Style::default().fg(Color::Rgb(120, 135, 160)).bg(row_bg).add_modifier(sel_mod)),
-        Span::styled(src_display, Style::default().fg(Color::Rgb(160, 170, 190)).bg(row_bg).add_modifier(sel_mod)),
+    Line::from(vec![
+        Span::styled(seq, s(Color::Rgb(70, 80, 100))),
+        Span::styled(time, s(Color::Rgb(120, 135, 160))),
+        Span::styled(src_d, s(Color::Rgb(160, 170, 190))),
         Span::raw(" "),
-        Span::styled(dst_display, Style::default().fg(Color::Rgb(190, 200, 220)).bg(row_bg).add_modifier(sel_mod)),
+        Span::styled(dst_d, s(Color::Rgb(190, 200, 220))),
         Span::raw(" "),
-        Span::styled(proto_display, Style::default().fg(proto_color).bg(row_bg).add_modifier(sel_mod)),
-        Span::styled(info, Style::default().fg(Color::Rgb(200, 210, 230)).bg(row_bg).add_modifier(sel_mod)),
-    ];
-
-    Line::from(spans)
+        Span::styled(proto, s(ev.service.color())),
+        Span::styled(len_str, s(Color::Rgb(100, 110, 130))),
+        Span::styled(truncpad(&info, width.saturating_sub(78)), s(Color::Rgb(200, 210, 230))),
+    ])
 }
 
-/// Build the Info column string — mimics Wireshark's protocol-specific summaries.
-fn build_info_string(event: &WireEvent) -> String {
-    let dir_arrow = match event.direction {
+/// Wireshark-style Info column with TCP flags, port arrows, and content hints.
+fn build_info(ev: &WireEvent) -> String {
+    let lp = ev.local_addr.port();
+    let rp = ev.remote_addr.port();
+    let arrow = match ev.direction {
         Direction::Outbound => "\u{2192}",
         Direction::Inbound => "\u{2190}",
-        Direction::Local => "\u{2194}",
-        Direction::Unknown => "?",
+        _ => "\u{2194}",
     };
 
-    let ports = format!(
-        "{} {} {}",
-        event.local_addr.port(),
-        dir_arrow,
-        event.remote_addr.port()
-    );
-
-    match &event.kind {
+    match &ev.kind {
         WireEventKind::NewConnection => {
-            let flags = tcp_flags_str(event.state);
-            let threat = if event.is_threat { " \u{2620}THREAT" } else { "" };
-            let proc = event.process_name.as_deref().unwrap_or("?");
-            format!("{} {} Len=0 <{}>{}",  ports, flags, proc, threat)
+            let flags = state_to_flags(ev.state);
+            let win = if ev.rx_queue > 0 { format!(" Win={}", ev.rx_queue) } else { String::new() };
+            let host = ev.hostname.as_deref().map(|h| format!(" [{}]", h)).unwrap_or_default();
+            let threat = if ev.is_threat { " \u{2620}THREAT" } else { "" };
+            format!("{} {} {} {} Seq=0{} Len=0{}{}", lp, arrow, rp, flags, win, host, threat)
         }
         WireEventKind::StateChange { from, to } => {
-            let flags = tcp_flags_str(*to);
-            format!("{} {} {} \u{2192} {}", ports, flags, short_state(*from), short_state(*to))
+            let flags = state_to_flags(*to);
+            let retrans = if ev.retransmits > 0 { format!(" [{}x retrans]", ev.retransmits) } else { String::new() };
+            let queue = if ev.tx_queue > 0 || ev.rx_queue > 0 {
+                format!(" TxQ={} RxQ={}", ev.tx_queue, ev.rx_queue)
+            } else { String::new() };
+            format!("{} {} {} {} {} \u{2192} {}{}{}", lp, arrow, rp, flags, short_state(*from), short_state(*to), queue, retrans)
         }
         WireEventKind::ConnectionClosed => {
-            let proc = event.process_name.as_deref().unwrap_or("?");
-            format!("{} [FIN, ACK] connection closed <{}>", ports, proc)
+            let proc = ev.process_name.as_deref().unwrap_or("?");
+            let host = ev.hostname.as_deref().map(|h| format!(" [{}]", h)).unwrap_or_default();
+            format!("{} {} {} [FIN, ACK] closed <{}>{}", lp, arrow, rp, proc, host)
         }
     }
 }
 
-/// Map TCP state to Wireshark-like flag notation.
-fn tcp_flags_str(state: TcpState) -> &'static str {
+fn state_to_flags(state: TcpState) -> &'static str {
     match state {
         TcpState::SynSent => "[SYN]",
         TcpState::SynRecv => "[SYN, ACK]",
         TcpState::Established => "[ACK]",
-        TcpState::FinWait1 => "[FIN, ACK]",
-        TcpState::FinWait2 => "[FIN, ACK]",
-        TcpState::CloseWait => "[FIN, ACK]",
-        TcpState::LastAck => "[ACK]",
-        TcpState::TimeWait => "[ACK]",
-        TcpState::Closing => "[RST]",
-        TcpState::Close => "[RST, ACK]",
+        TcpState::FinWait1 | TcpState::FinWait2 | TcpState::CloseWait => "[FIN, ACK]",
+        TcpState::LastAck | TcpState::TimeWait => "[ACK]",
+        TcpState::Closing | TcpState::Close => "[RST, ACK]",
         _ => "",
     }
 }
 
-fn short_state(state: TcpState) -> &'static str {
-    match state {
-        TcpState::Established => "EST",
-        TcpState::SynSent => "SYN",
-        TcpState::SynRecv => "SYN+A",
-        TcpState::FinWait1 => "FIN1",
-        TcpState::FinWait2 => "FIN2",
-        TcpState::TimeWait => "TW",
-        TcpState::Close => "CLOSE",
-        TcpState::CloseWait => "CW",
-        TcpState::LastAck => "LACK",
-        TcpState::Listen => "LISTEN",
-        TcpState::Closing => "CLOSING",
-        TcpState::Unknown => "?",
+fn short_state(s: TcpState) -> &'static str {
+    match s {
+        TcpState::Established => "EST",  TcpState::SynSent => "SYN",
+        TcpState::SynRecv => "SYN+A",   TcpState::FinWait1 => "FIN1",
+        TcpState::FinWait2 => "FIN2",   TcpState::TimeWait => "TW",
+        TcpState::Close => "CLOSE",     TcpState::CloseWait => "CW",
+        TcpState::LastAck => "LACK",    TcpState::Listen => "LISTEN",
+        TcpState::Closing => "CLOSING", TcpState::Unknown => "?",
     }
 }
 
-// ─── Detail Pane (Middle) ───────────────────────────────────────────
+fn format_dst(ev: &WireEvent) -> String {
+    ev.hostname.as_deref()
+        .map(|h| {
+            let p = ev.remote_addr.port();
+            if h.len() > 15 { format!("{}..:{}", &h[..15], p) }
+            else { format!("{}:{}", h, p) }
+        })
+        .unwrap_or_else(|| format!("{}", ev.remote_addr))
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// PANE 2: PROTOCOL DETAIL (expandable tree)
+// ═══════════════════════════════════════════════════════════════════
 
 fn draw_detail_pane(f: &mut Frame, app: &App, area: Rect) {
-    let expand_icon = if app.wire_detail_expanded { "\u{25bc}" } else { "\u{25b6}" };
+    let icon = if app.wire_detail_expanded { "\u{25bc}" } else { "\u{25b6}" };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
         .title(vec![
-            Span::styled(
-                format!(" {} Event Detail ", expand_icon),
-                Style::default().fg(theme::TITLE).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                " Enter=expand/collapse ",
-                Style::default().fg(Color::Rgb(80, 90, 110)),
-            ),
+            Span::styled(format!(" {} Protocol Detail ", icon), Style::default().fg(theme::TITLE).add_modifier(Modifier::BOLD)),
+            Span::styled("  Enter: expand/collapse  ", Style::default().fg(Color::Rgb(255, 200, 80))),
         ])
         .style(Style::default().bg(theme::BG));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
-
-    if inner.width < 30 || inner.height < 1 {
-        return;
-    }
+    if inner.width < 30 || inner.height < 1 { return; }
 
     let events = app.wire_tracker.events();
-    let selected = app.wire_selected;
-    let event = events.get(selected);
+    let ev = events.get(app.wire_selected);
 
-    let mut lines: Vec<Line> = Vec::new();
     let lbl = Style::default().fg(Color::Rgb(100, 180, 255)).add_modifier(Modifier::BOLD);
     let val = Style::default().fg(theme::TEXT);
     let dim = Style::default().fg(theme::TEXT_DIM);
+    let tree = Style::default().fg(Color::Rgb(40, 50, 70));
 
-    if let Some(ev) = event {
-        // Always show the summary line (even when collapsed)
-        let kind_str = match &ev.kind {
-            WireEventKind::NewConnection => "New Connection",
-            WireEventKind::ConnectionClosed => "Connection Closed",
-            WireEventKind::StateChange { .. } => "State Transition",
-        };
-        let proc_name = ev.process_name.as_deref().unwrap_or("?");
-        let proto = if ev.protocol == Protocol::Tcp { "TCP" } else { "UDP" };
+    let mut lines: Vec<Line> = Vec::new();
 
-        lines.push(Line::from(vec![
-            Span::styled("  \u{25b8} ", lbl),
-            Span::styled(format!("{} ", kind_str), val),
-            Span::styled(format!("| {} {} \u{2192} {} ", proto, ev.local_addr, ev.remote_addr), dim),
-            Span::styled(format!("| {} ", ev.service.label()), Style::default().fg(ev.service.color())),
-            Span::styled(format!("| {} ", proc_name), Style::default().fg(theme::GREEN)),
-        ]));
+    match ev {
+        None => {
+            lines.push(Line::from(Span::styled(
+                "  Use j/k to select an event, Enter to expand detail",
+                Style::default().fg(theme::TEXT_DIM),
+            )));
+        }
+        Some(ev) if !app.wire_detail_expanded => {
+            // Collapsed: single summary line
+            let kind = match &ev.kind {
+                WireEventKind::NewConnection => "NEW",
+                WireEventKind::ConnectionClosed => "CLOSE",
+                WireEventKind::StateChange { .. } => "STATE",
+            };
+            let proto = if ev.protocol == Protocol::Tcp { "TCP" } else { "UDP" };
+            let proc = ev.process_name.as_deref().unwrap_or("?");
+            lines.push(Line::from(vec![
+                Span::styled("  ", dim),
+                Span::styled(format!("[{}] ", kind), lbl),
+                Span::styled(format!("{} {} \u{2192} {} ", proto, ev.local_addr, ev.remote_addr), val),
+                Span::styled(format!("({}) ", ev.service.label()), Style::default().fg(ev.service.color())),
+                Span::styled(format!("<{}>", proc), Style::default().fg(theme::GREEN)),
+            ]));
+        }
+        Some(ev) => {
+            // Expanded: full Wireshark-style protocol tree
+            let proto = if ev.protocol == Protocol::Tcp { "TCP" } else { "UDP" };
+            let proc = ev.process_name.as_deref().unwrap_or("unknown");
+            let kind_str = match &ev.kind {
+                WireEventKind::NewConnection => "New Connection",
+                WireEventKind::ConnectionClosed => "Connection Closed",
+                WireEventKind::StateChange { from, to } => {
+                    // Can't return a temp string, handle below
+                    "State Transition"
+                }
+            };
 
-        // Expanded detail layers
-        if app.wire_detail_expanded {
-            // Network layer
+            // Layer 1: Frame / Event
+            lines.push(Line::from(vec![
+                Span::styled("  \u{251c}\u{2500} ", tree),
+                Span::styled("Event: ", lbl),
+                Span::styled(kind_str.to_string(), val),
+                Span::styled(format!("  state={}", ev.state.label()), dim),
+            ]));
+            if let WireEventKind::StateChange { from, to } = &ev.kind {
+                lines.push(Line::from(vec![
+                    Span::styled("  \u{2502}  \u{2514}\u{2500} ", tree),
+                    Span::styled(format!("{} \u{2192} {}", from.label(), to.label()), Style::default().fg(theme::WARN)),
+                ]));
+            }
+
+            // Layer 2: Network
             let dir_label = match ev.direction {
                 Direction::Outbound => "\u{2192} Outbound",
                 Direction::Inbound => "\u{2190} Inbound",
@@ -360,86 +324,212 @@ fn draw_detail_pane(f: &mut Frame, app: &App, area: Rect) {
                 Direction::Unknown => "? Unknown",
             };
             lines.push(Line::from(vec![
-                Span::styled("    \u{25b8} Network: ", lbl),
-                Span::styled(format!("{} {} \u{2192} {} ", proto, ev.local_addr, ev.remote_addr), val),
+                Span::styled("  \u{251c}\u{2500} ", tree),
+                Span::styled(format!("{}, ", proto), lbl),
+                Span::styled(format!("Src: {}  Dst: {}  ", ev.local_addr, ev.remote_addr), val),
                 Span::styled(format!("({})", dir_label), dim),
             ]));
 
-            // Service
+            // Layer 3: Service / Application
             lines.push(Line::from(vec![
-                Span::styled("    \u{25b8} Service: ", lbl),
-                Span::styled(ev.service.label().to_string(), Style::default().fg(ev.service.color())),
-                Span::styled(format!("  (port {})", ev.remote_addr.port()), dim),
+                Span::styled("  \u{251c}\u{2500} ", tree),
+                Span::styled("Service: ", lbl),
+                Span::styled(format!("{}  ", ev.service.label()), Style::default().fg(ev.service.color())),
+                Span::styled(format!("port={}", ev.remote_addr.port()), dim),
             ]));
 
-            // Process
-            let pid_str = ev.pid.map(|p| format!(" (PID {})", p)).unwrap_or_default();
+            // Layer 4: Process
+            let pid_str = ev.pid.map(|p| format!("  PID={}", p)).unwrap_or_default();
             lines.push(Line::from(vec![
-                Span::styled("    \u{25b8} Process: ", lbl),
-                Span::styled(proc_name.to_string(), Style::default().fg(theme::GREEN)),
+                Span::styled("  \u{251c}\u{2500} ", tree),
+                Span::styled("Process: ", lbl),
+                Span::styled(proc.to_string(), Style::default().fg(theme::GREEN)),
                 Span::styled(pid_str, dim),
             ]));
 
-            // GeoIP
-            if !ev.country_code.is_empty() {
-                let hostname = ev.hostname.as_deref().unwrap_or("");
+            // Layer 5: GeoIP + Hostname
+            if !ev.country_code.is_empty() || ev.hostname.is_some() {
+                let host = ev.hostname.as_deref().unwrap_or("");
                 lines.push(Line::from(vec![
-                    Span::styled("    \u{25b8} GeoIP:   ", lbl),
+                    Span::styled("  \u{251c}\u{2500} ", tree),
+                    Span::styled("GeoIP: ", lbl),
                     Span::styled(ev.country_code.clone(), Style::default().fg(theme::CYAN)),
-                    Span::styled(if hostname.is_empty() { String::new() } else { format!("  {}", hostname) }, dim),
+                    Span::styled(if host.is_empty() { String::new() } else { format!("  hostname={}", host) }, dim),
                 ]));
             }
 
-            // Bandwidth
-            if ev.tx_bps > 0.0 || ev.rx_bps > 0.0 {
-                lines.push(Line::from(vec![
-                    Span::styled("    \u{25b8} Traffic: ", lbl),
-                    Span::styled(format!("\u{2191}{}", format_bps(ev.tx_bps)), Style::default().fg(theme::UPLOAD)),
-                    Span::styled("  ", dim),
-                    Span::styled(format!("\u{2193}{}", format_bps(ev.rx_bps)), Style::default().fg(theme::DOWNLOAD)),
-                ]));
+            // Layer 6: TCP Internals
+            if ev.tx_queue > 0 || ev.rx_queue > 0 || ev.retransmits > 0 || ev.tx_bps > 0.0 {
+                let mut parts = vec![
+                    Span::styled("  \u{251c}\u{2500} ", tree),
+                    Span::styled("TCP: ", lbl),
+                ];
+                if ev.tx_queue > 0 { parts.push(Span::styled(format!("TxQueue={}  ", format_bytes(ev.tx_queue as u64)), val)); }
+                if ev.rx_queue > 0 { parts.push(Span::styled(format!("RxQueue={}  ", format_bytes(ev.rx_queue as u64)), val)); }
+                if ev.retransmits > 0 { parts.push(Span::styled(format!("Retrans={}  ", ev.retransmits), Style::default().fg(theme::RED))); }
+                if ev.tx_bps > 0.0 { parts.push(Span::styled(format!("\u{2191}{}  ", format_bps(ev.tx_bps)), Style::default().fg(theme::UPLOAD))); }
+                if ev.rx_bps > 0.0 { parts.push(Span::styled(format!("\u{2193}{}", format_bps(ev.rx_bps)), Style::default().fg(theme::DOWNLOAD))); }
+                lines.push(Line::from(parts));
             }
 
-            // Timestamp
+            // Layer 7: Timestamp
             lines.push(Line::from(vec![
-                Span::styled("    \u{25b8} Time:    ", lbl),
-                Span::styled(ev.timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string(), dim),
+                Span::styled("  \u{251c}\u{2500} ", tree),
+                Span::styled("Time: ", lbl),
+                Span::styled(ev.timestamp.format("%Y-%m-%d %H:%M:%S.%3f UTC").to_string(), dim),
                 Span::styled(format!("  ({})", format_time_ago(ev.timestamp)), dim),
             ]));
 
             // Threat
             if ev.is_threat {
                 lines.push(Line::from(vec![
-                    Span::styled("    \u{25b8} ", lbl),
-                    Span::styled(
-                        "\u{2620} THREAT — IP on threat intelligence blocklist",
-                        Style::default().fg(Color::Rgb(255, 60, 60)).add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled("  \u{251c}\u{2500} ", tree),
+                    Span::styled("\u{2620} THREAT ", Style::default().fg(theme::RED).add_modifier(Modifier::BOLD)),
+                    Span::styled("IP on threat intelligence blocklist", Style::default().fg(theme::RED)),
                 ]));
             }
 
-            // State change
-            if let WireEventKind::StateChange { from, to } = &ev.kind {
-                lines.push(Line::from(vec![
-                    Span::styled("    \u{25b8} Change:  ", lbl),
-                    Span::styled(from.label().to_string(), Style::default().fg(theme::WARN)),
-                    Span::styled(" \u{2192} ", dim),
-                    Span::styled(to.label().to_string(), Style::default().fg(theme::GREEN)),
-                ]));
-            }
+            // End cap
+            lines.push(Line::from(Span::styled("  \u{2514}\u{2500}\u{2500}\u{2500}", tree)));
         }
-    } else {
-        lines.push(Line::from(Span::styled(
-            "  Select an event with j/k to view details (Enter to expand)",
-            Style::default().fg(theme::TEXT_DIM),
-        )));
     }
 
-    let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::BG));
-    f.render_widget(paragraph, inner);
+    f.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::BG)), inner);
 }
 
-// ─── Status Bar (Bottom) ────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// PANE 3: PACKET BYTES (hex-dump style connection metadata)
+// ═══════════════════════════════════════════════════════════════════
+
+fn draw_bytes_pane(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
+        .title(Span::styled(
+            " Packet Data ",
+            Style::default().fg(theme::TITLE).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(theme::BG));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width < 40 || inner.height < 2 { return; }
+
+    let events = app.wire_tracker.events();
+    let ev = match events.get(app.wire_selected) {
+        Some(e) => e,
+        None => {
+            f.render_widget(Paragraph::new("").style(Style::default().bg(theme::BG)), inner);
+            return;
+        }
+    };
+
+    let hex_fg = Style::default().fg(Color::Rgb(100, 160, 220));
+    let ascii_fg = Style::default().fg(Color::Rgb(80, 200, 120));
+    let offset_fg = Style::default().fg(Color::Rgb(60, 70, 90));
+    let label_fg = Style::default().fg(Color::Rgb(140, 150, 170));
+
+    // Build a pseudo-packet from connection metadata (like Wireshark's hex pane)
+    // Format: offset | hex bytes | ASCII interpretation
+    let mut data_lines: Vec<(String, String, String)> = Vec::new();
+
+    // Row 1: Protocol + State
+    let proto = if ev.protocol == Protocol::Tcp { "TCP" } else { "UDP" };
+    let state_hex = format!("{:02x}", ev.state as u8);
+    data_lines.push((
+        "0000".into(),
+        format!("{:<24}", format!("{:02x} {:02x} {:02x} {} {:02x} {:02x}",
+            if ev.protocol == Protocol::Tcp { 0x06 } else { 0x11 },
+            ev.state as u8,
+            match ev.direction { Direction::Inbound => 0x01, Direction::Outbound => 0x02, Direction::Local => 0x03, _ => 0x00 },
+            format_port_hex(ev.local_addr.port()),
+            (ev.remote_addr.port() >> 8) as u8,
+            (ev.remote_addr.port() & 0xff) as u8,
+        )),
+        format!("{} {} {}", proto, ev.state.label(), match ev.direction { Direction::Outbound => "OUT", Direction::Inbound => "IN", Direction::Local => "LO", _ => "??" }),
+    ));
+
+    // Row 2: Source IP
+    let src_ip = ev.local_addr.ip();
+    data_lines.push((
+        "0008".into(),
+        format!("{:<24}", format_ip_hex(src_ip)),
+        format!("Src: {}", src_ip),
+    ));
+
+    // Row 3: Dest IP
+    let dst_ip = ev.remote_addr.ip();
+    data_lines.push((
+        "0010".into(),
+        format!("{:<24}", format_ip_hex(dst_ip)),
+        format!("Dst: {}", dst_ip),
+    ));
+
+    // Row 4: Queues + retransmits
+    data_lines.push((
+        "0018".into(),
+        format!("{:<24}", format!("{:04x} {:04x} {:04x} 0000",
+            ev.tx_queue.min(0xffff) as u16,
+            ev.rx_queue.min(0xffff) as u16,
+            ev.retransmits.min(0xffff) as u16,
+        )),
+        format!("TxQ={} RxQ={} Ret={}", ev.tx_queue, ev.rx_queue, ev.retransmits),
+    ));
+
+    // Row 5: Service + hostname preview
+    let svc = ev.service.label();
+    let host = ev.hostname.as_deref().unwrap_or("-");
+    let host_trunc = if host.len() > 20 { &host[..20] } else { host };
+    data_lines.push((
+        "0020".into(),
+        format!("{:<24}", string_to_hex(svc)),
+        format!("{} [{}]", svc, host_trunc),
+    ));
+
+    // Row 6: Process name
+    let proc = ev.process_name.as_deref().unwrap_or("?");
+    data_lines.push((
+        "0028".into(),
+        format!("{:<24}", string_to_hex(proc)),
+        format!("Process: {}", proc),
+    ));
+
+    let mut lines: Vec<Line> = Vec::with_capacity(data_lines.len());
+    for (offset, hex, ascii) in &data_lines {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {}  ", offset), offset_fg),
+            Span::styled(format!("{}  ", hex), hex_fg),
+            Span::styled(ascii.clone(), ascii_fg),
+        ]));
+    }
+
+    f.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::BG)), inner);
+}
+
+fn format_port_hex(port: u16) -> String {
+    format!("{:02x} {:02x}", (port >> 8) as u8, (port & 0xff) as u8)
+}
+
+fn format_ip_hex(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            format!("{:02x} {:02x} {:02x} {:02x} 00 00 00 00", o[0], o[1], o[2], o[3])
+        }
+        std::net::IpAddr::V6(v6) => {
+            let s = v6.segments();
+            format!("{:04x} {:04x} {:04x} {:04x}", s[0], s[1], s[2], s[3])
+        }
+    }
+}
+
+fn string_to_hex(s: &str) -> String {
+    s.bytes().take(8).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// STATUS BAR
+// ═══════════════════════════════════════════════════════════════════
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
@@ -449,51 +539,35 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 
     let inner = block.inner(area);
     f.render_widget(block, area);
-
-    if inner.width < 20 || inner.height == 0 {
-        return;
-    }
+    if inner.width < 20 || inner.height == 0 { return; }
 
     let stats = &app.wire_tracker.stats;
+    let k = |s: &str| Span::styled(s.to_string(), Style::default().fg(Color::Rgb(255, 200, 80)));
+    let t = |s: &str| Span::styled(s.to_string(), Style::default().fg(theme::TEXT_DIM));
+    let sep = || Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER));
 
     let line = Line::from(vec![
         Span::styled(
             if app.wire_auto_scroll { " \u{25cf} Live " } else { " \u{25cb} Scroll " },
             Style::default().fg(if app.wire_auto_scroll { Color::Rgb(80, 220, 120) } else { Color::Rgb(200, 160, 60) }).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!("{} events", stats.total_events),
-            Style::default().fg(theme::TEXT),
-        ),
-        Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+        Span::styled(format!("{} events", stats.total_events), Style::default().fg(theme::TEXT)),
+        sep(),
         Span::styled(format!("TCP:{} ", stats.tcp_count), Style::default().fg(theme::CYAN)),
-        Span::styled(format!("UDP:{} ", stats.udp_count), Style::default().fg(theme::PURPLE)),
-        Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+        Span::styled(format!("UDP:{}", stats.udp_count), Style::default().fg(theme::PURPLE)),
+        sep(),
         Span::styled(format!("\u{2191}{} ", format_bps(app.current_tx_bps)), Style::default().fg(theme::UPLOAD)),
-        Span::styled(format!("\u{2193}{} ", format_bps(app.current_rx_bps)), Style::default().fg(theme::DOWNLOAD)),
-        Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
-        Span::styled(" j", Style::default().fg(Color::Rgb(255, 200, 80))),
-        Span::styled("/", Style::default().fg(theme::TEXT_DIM)),
-        Span::styled("k", Style::default().fg(Color::Rgb(255, 200, 80))),
-        Span::styled(":select ", Style::default().fg(theme::TEXT_DIM)),
-        Span::styled("G", Style::default().fg(Color::Rgb(255, 200, 80))),
-        Span::styled(":latest ", Style::default().fg(theme::TEXT_DIM)),
-        Span::styled("Enter", Style::default().fg(Color::Rgb(255, 200, 80))),
-        Span::styled(":detail ", Style::default().fg(theme::TEXT_DIM)),
-        Span::styled("?", Style::default().fg(Color::Rgb(255, 200, 80))),
-        Span::styled(":help ", Style::default().fg(theme::TEXT_DIM)),
+        Span::styled(format!("\u{2193}{}", format_bps(app.current_rx_bps)), Style::default().fg(theme::DOWNLOAD)),
+        sep(),
+        k("j"), t("/"), k("k"), t(":select "),
+        k("G"), t(":latest "),
+        k("Enter"), t(":expand "),
+        k("?"), t(":help"),
     ]);
 
-    let paragraph = Paragraph::new(line).style(Style::default().bg(theme::BG));
-    f.render_widget(paragraph, inner);
+    f.render_widget(Paragraph::new(line).style(Style::default().bg(theme::BG)), inner);
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────
-
-fn truncpad(s: &str, width: usize) -> String {
-    if s.len() > width {
-        s[..width].to_string()
-    } else {
-        format!("{:<width$}", s, width = width)
-    }
+fn truncpad(s: &str, w: usize) -> String {
+    if s.len() > w { s[..w].to_string() } else { format!("{:<width$}", s, width = w) }
 }
