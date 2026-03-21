@@ -74,15 +74,14 @@ pub fn flush_pending_maps(render: bool) {
     for pw in &writes {
         let max_col = pw.map_cols as usize;
 
-        // Write each line of the ANSI map frame — clipped to widget width
+        // Write each line of the ANSI map frame — strictly clipped to widget width
         for (i, line) in pw.ansi.split('\n').enumerate() {
             let line = line.trim_end_matches('\r');
             if i >= pw.map_rows as usize { break; }
             let _ = crossterm::execute!(stdout, crossterm::cursor::MoveTo(pw.origin_x, pw.origin_y + i as u16));
-            // Write the line content (no \x1B[K — don't clear past our boundary)
-            let _ = write!(stdout, "{}", line);
-            // Reset color at end of each line to prevent bleed
-            let _ = write!(stdout, "\x1B[0m");
+            // Truncate to widget width to prevent overflow into adjacent panels
+            let clipped = strip_ansi_truncate(line, max_col);
+            let _ = write!(stdout, "{}\x1B[0m", clipped);
         }
 
         // Help bar — clipped

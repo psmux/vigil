@@ -59,9 +59,11 @@ fn main() -> anyhow::Result<()> {
     let mut prev_view = app.view;
 
     loop {
-        // If we just left Attack Radar, force a full terminal redraw
-        // to clear any ANSI content that ratatui's diff buffer doesn't know about.
-        if prev_view == app::View::AttackRadar && app.view != app::View::AttackRadar {
+        // Force full redraw when entering or leaving Attack Radar
+        // to prevent ANSI content from bleeding between views.
+        if prev_view != app.view
+            && (prev_view == app::View::AttackRadar || app.view == app::View::AttackRadar)
+        {
             terminal.clear()?;
         }
         prev_view = app.view;
