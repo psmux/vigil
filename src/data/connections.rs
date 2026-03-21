@@ -1,4 +1,7 @@
 //! Connection collector — full pipeline from /proc parsing to enriched Connection structs.
+//!
+//! Auto-discovers ALL socket files in /proc/net/ — tcp, udp, icmp, raw,
+//! udplite, and any future protocol the kernel exposes.  Nothing escapes.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -8,41 +11,16 @@ use crate::data::geoip;
 use crate::data::threat;
 
 /// Full collection pipeline:
-/// 1. Parse /proc/net/tcp, tcp6, udp, udp6
+/// 1. Auto-discover and parse ALL /proc/net/ socket files
 /// 2. Build inode→pid map
 /// 3. Construct enriched Connection structs
 pub fn collect_connections() -> Vec<Connection> {
-    let mut raw_sockets: Vec<(procfs::RawSocket, Protocol, bool)> = Vec::new();
-
-    for s in procfs::parse_proc_net_tcp(false) {
-        raw_sockets.push((s, Protocol::Tcp, false));
-    }
-    for s in procfs::parse_proc_net_tcp(true) {
-        raw_sockets.push((s, Protocol::Tcp, true));
-    }
-    for s in procfs::parse_proc_net_udp(false) {
-        raw_sockets.push((s, Protocol::Udp, false));
-    }
-    for s in procfs::parse_proc_net_udp(true) {
-        raw_sockets.push((s, Protocol::Udp, true));
-    }
-    for s in procfs::parse_proc_net_icmp(false) {
-        raw_sockets.push((s, Protocol::Icmp, false));
-    }
-    for s in procfs::parse_proc_net_icmp(true) {
-        raw_sockets.push((s, Protocol::Icmp, true));
-    }
-    for s in procfs::parse_proc_net_raw(false) {
-        raw_sockets.push((s, Protocol::Raw, false));
-    }
-    for s in procfs::parse_proc_net_raw(true) {
-        raw_sockets.push((s, Protocol::Raw, true));
-    }
-
+    let raw_sockets = procfs::parse_all_proc_net_sockets();
     let inode_map = procfs::build_inode_pid_map();
     let mut connections = Vec::with_capacity(raw_sockets.len());
 
-    for (raw, protocol, is_v6) in raw_sockets {
+    for (raw, proto_name) in raw_sockets {
+        let is_v6 = raw.local_addr > u32::MAX as u128 || raw.remote_addr > u32::MAX as u128;
         let local_ip = u128_to_ip(raw.local_addr, is_v6);
         let remote_ip = u128_to_ip(raw.remote_addr, is_v6);
 
@@ -50,6 +28,7 @@ pub fn collect_connections() -> Vec<Connection> {
         let remote_addr = SocketAddr::new(remote_ip, raw.remote_port);
 
         let state = TcpState::from_u8(raw.state);
+        let protocol = protocol_from_name(&proto_name);
 
         let pid = inode_map.get(&raw.inode).copied();
         let process_name = pid.and_then(procfs::get_process_name).or_else(|| {
@@ -71,7 +50,7 @@ pub fn collect_connections() -> Vec<Connection> {
         };
 
         let is_threat = threat::is_threat_ip(&remote_ip);
-        let direction = classify_direction(local_addr, remote_addr, state);
+        let direction = classify_direction(remote_addr, state);
 
         connections.push(Connection {
             local_addr,
@@ -106,37 +85,30 @@ fn u128_to_ip(addr: u128, is_ipv6: bool) -> IpAddr {
     }
 }
 
-/// Direction classification — dead simple:
-///
-/// - Remote is loopback or unspecified → Local
-/// - TCP LISTEN state → Inbound (server socket, not a connection)
-/// - Everything else with a real remote IP → Outbound
-///
-/// If a socket has a remote address that isn't this machine,
-/// something on this machine is talking to the outside. That's outbound.
-fn classify_direction(
-    _local: SocketAddr,
-    remote: SocketAddr,
-    state: TcpState,
-) -> Direction {
+/// Map /proc/net/ filename to Protocol enum.
+fn protocol_from_name(name: &str) -> Protocol {
+    match name {
+        "tcp" => Protocol::Tcp,
+        "udp" => Protocol::Udp,
+        "icmp" => Protocol::Icmp,
+        _ => Protocol::Raw, // raw, udplite, sctp, anything else
+    }
+}
+
+/// Direction: is the remote a different machine? Then outbound.
+fn classify_direction(remote: SocketAddr, state: TcpState) -> Direction {
     let remote_ip = remote.ip();
 
-    // Not a real connection — no remote
     if remote_ip.is_unspecified() {
         return Direction::Local;
     }
-
-    // Talking to ourselves
     if remote_ip.is_loopback() {
         return Direction::Local;
     }
-
-    // Server socket waiting for connections — not outbound
     if state == TcpState::Listen {
         return Direction::Inbound;
     }
 
-    // Anything else: this machine is talking to a remote IP → outbound
     Direction::Outbound
 }
 

@@ -28,90 +28,97 @@ pub struct RawSocket {
     pub uid: u32,
 }
 
-// ─── /proc/net/tcp and /proc/net/tcp6 ───────────────────────────────
+// ─── Auto-discovery of ALL socket files in /proc/net/ ────────────────
 
-/// Parse `/proc/net/tcp` (ipv6=false) or `/proc/net/tcp6` (ipv6=true).
-/// Returns an empty Vec on any read error (i.e. non-Linux).
-pub fn parse_proc_net_tcp(ipv6: bool) -> Vec<RawSocket> {
-    let path = if ipv6 { "/proc/net/tcp6" } else { "/proc/net/tcp" };
-    parse_proc_net_socket_file(path, ipv6)
-}
-
-/// Parse `/proc/net/udp` (ipv6=false) or `/proc/net/udp6` (ipv6=true).
-pub fn parse_proc_net_udp(ipv6: bool) -> Vec<RawSocket> {
-    let path = if ipv6 { "/proc/net/udp6" } else { "/proc/net/udp" };
-    parse_proc_net_socket_file(path, ipv6)
-}
-
-/// Parse `/proc/net/icmp` (ipv6=false) or `/proc/net/icmp6` (ipv6=true).
-/// Same format as tcp/udp — captures ping and other ICMP traffic.
-pub fn parse_proc_net_icmp(ipv6: bool) -> Vec<RawSocket> {
-    let path = if ipv6 { "/proc/net/icmp6" } else { "/proc/net/icmp" };
-    parse_proc_net_socket_file(path, ipv6)
-}
-
-/// Parse `/proc/net/raw` (ipv6=false) or `/proc/net/raw6` (ipv6=true).
-/// Captures raw socket traffic (traceroute, custom protocols, etc.).
-pub fn parse_proc_net_raw(ipv6: bool) -> Vec<RawSocket> {
-    let path = if ipv6 { "/proc/net/raw6" } else { "/proc/net/raw" };
-    parse_proc_net_socket_file(path, ipv6)
-}
-
-/// Shared parser for /proc/net/{tcp,tcp6,udp,udp6}.
+/// Scan `/proc/net/` and parse EVERY file that has the kernel socket table
+/// format (header starting with "sl").  Returns `(RawSocket, protocol_name)`
+/// pairs — no hardcoded file list, nothing escapes.
 ///
-/// Each line (after the header) looks like:
-///   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
-///   0: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12345 ...
-fn parse_proc_net_socket_file(path: &str, ipv6: bool) -> Vec<RawSocket> {
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
+/// Covers: tcp, tcp6, udp, udp6, icmp, icmp6, raw, raw6, udplite, udplite6,
+/// and any future protocol the kernel adds.
+pub fn parse_all_proc_net_sockets() -> Vec<(RawSocket, String)> {
+    let net_dir = Path::new("/proc/net");
+    if !net_dir.exists() {
+        return Vec::new();
+    }
+
+    let entries = match fs::read_dir(net_dir) {
+        Ok(e) => e,
         Err(_) => return Vec::new(),
     };
 
     let mut results = Vec::new();
-    for line in content.lines().skip(1) {
-        // skip header
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 10 {
+
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let name = fname.to_string_lossy().to_string();
+
+        // Skip non-socket files (dev, route, arp, snmp, netstat, etc.)
+        // Socket files have a header line starting with "sl" or "  sl"
+        let path = entry.path();
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Check if first line looks like a socket table header
+        let first_line = match content.lines().next() {
+            Some(l) => l.trim(),
+            None => continue,
+        };
+        if !first_line.starts_with("sl") {
             continue;
         }
 
-        // fields[1] = local_address  (hex_ip:hex_port)
-        // fields[2] = rem_address
-        // fields[3] = state (hex)
-        // fields[9] = inode
+        // Determine if IPv6 from filename (ends with "6")
+        let is_v6 = name.ends_with('6');
 
-        let (local_addr, local_port) = match parse_addr_port(fields[1], ipv6) {
-            Some(v) => v,
-            None => continue,
+        // Derive the base protocol name (strip trailing "6")
+        let proto_name = if is_v6 {
+            name[..name.len() - 1].to_string()
+        } else {
+            name.clone()
         };
-        let (remote_addr, remote_port) = match parse_addr_port(fields[2], ipv6) {
-            Some(v) => v,
-            None => continue,
-        };
-        let state = u8::from_str_radix(fields[3], 16).unwrap_or(0);
-        let inode = fields[9].parse::<u64>().unwrap_or(0);
 
-        // fields[4] = "tx_queue:rx_queue" (hex:hex)
-        let (tx_queue, rx_queue) = parse_queue_pair(fields[4]);
-        // fields[6] = retransmit count (decimal)
-        let retransmits = fields[6].parse::<u32>().unwrap_or(0);
-        // fields[7] = uid (decimal)
-        let uid = fields[7].parse::<u32>().unwrap_or(0);
+        // Parse all socket rows
+        for line in content.lines().skip(1) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 10 {
+                continue;
+            }
 
-        results.push(RawSocket {
-            local_addr,
-            local_port,
-            remote_addr,
-            remote_port,
-            state,
-            inode,
-            tx_queue,
-            rx_queue,
-            retransmits,
-            uid,
-        });
+            let (local_addr, local_port) = match parse_addr_port(fields[1], is_v6) {
+                Some(v) => v,
+                None => continue,
+            };
+            let (remote_addr, remote_port) = match parse_addr_port(fields[2], is_v6) {
+                Some(v) => v,
+                None => continue,
+            };
+            let state = u8::from_str_radix(fields[3], 16).unwrap_or(0);
+            let inode = fields[9].parse::<u64>().unwrap_or(0);
+            let (tx_queue, rx_queue) = parse_queue_pair(fields[4]);
+            let retransmits = fields[6].parse::<u32>().unwrap_or(0);
+            let uid = fields[7].parse::<u32>().unwrap_or(0);
+
+            results.push((
+                RawSocket {
+                    local_addr,
+                    local_port,
+                    remote_addr,
+                    remote_port,
+                    state,
+                    inode,
+                    tx_queue,
+                    rx_queue,
+                    retransmits,
+                    uid,
+                },
+                proto_name.clone(),
+            ));
+        }
     }
+
     results
 }
 
