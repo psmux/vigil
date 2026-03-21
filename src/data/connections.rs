@@ -152,19 +152,60 @@ fn classify_direction(local: SocketAddr, remote: SocketAddr, state: TcpState) ->
     match state {
         TcpState::Listen => Direction::Inbound,
         TcpState::Established => {
-            // Heuristic: if local port is well-known (< 1024) it's likely inbound
-            if local.port() < 1024 {
-                Direction::Inbound
-            } else if remote.port() < 1024 {
-                Direction::Outbound
-            } else {
-                Direction::Unknown
+            let lp = local.port();
+            let rp = remote.port();
+
+            // Well-known port heuristics
+            if lp < 1024 {
+                return Direction::Inbound;
             }
+            if rp < 1024 {
+                return Direction::Outbound;
+            }
+
+            // Common service ports on remote side → Outbound
+            if is_common_remote_port(rp) {
+                return Direction::Outbound;
+            }
+            // Common service ports on local side → Inbound
+            if is_common_remote_port(lp) {
+                return Direction::Inbound;
+            }
+
+            // Ephemeral port heuristic: local port in ephemeral range
+            // with remote on a public IP → likely outbound
+            if lp >= 32768 && !geoip::is_private_ip(remote_ip) {
+                return Direction::Outbound;
+            }
+
+            Direction::Unknown
         }
         TcpState::SynSent => Direction::Outbound,
         TcpState::SynRecv => Direction::Inbound,
+        TcpState::CloseWait | TcpState::FinWait1 | TcpState::FinWait2 => {
+            // Inherit direction from port heuristics
+            if local.port() < 1024 { Direction::Inbound }
+            else if remote.port() < 1024 { Direction::Outbound }
+            else if local.port() >= 32768 && !geoip::is_private_ip(remote_ip) {
+                Direction::Outbound
+            } else { Direction::Unknown }
+        }
         _ => Direction::Unknown,
     }
+}
+
+/// Common service ports that indicate the remote is a server (connection is outbound).
+fn is_common_remote_port(port: u16) -> bool {
+    matches!(
+        port,
+        80 | 443 | 8080 | 8443 | 3306 | 5432 | 6379 | 27017 |  // HTTP, HTTPS, DBs
+        5222 | 5223 | 5228 | 5229 | 5230 |                       // XMPP, GCM
+        9090 | 9093 | 9200 | 9300 |                               // Prometheus, Elasticsearch
+        1883 | 8883 |                                               // MQTT
+        6667 | 6697 |                                               // IRC
+        3478 | 5349 |                                               // STUN/TURN
+        1935 | 554                                                  // RTMP, RTSP
+    )
 }
 
 fn is_local_ip(ip: IpAddr) -> bool {

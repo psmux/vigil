@@ -41,6 +41,10 @@ fn dot_mask(cx: usize, cy: usize) -> u8 {
 const COASTLINE_PRIMARY: Color = Color::Rgb(60, 95, 140);
 /// Secondary coastlines: island detail, small features — subtler blue
 const COASTLINE_SECONDARY: Color = Color::Rgb(40, 70, 110);
+/// Country land borders — subtle warm tone distinct from coastlines
+const BORDER_COLOR: Color = Color::Rgb(50, 60, 80);
+/// Land fill — very subtle shade to distinguish land from ocean
+const LAND_FILL_COLOR: Color = Color::Rgb(14, 20, 36);
 /// Latitude / longitude grid
 const GRID_COLOR: Color = Color::Rgb(18, 25, 42);
 /// Continent label text
@@ -58,6 +62,7 @@ pub struct BrailleCanvas {
     height: usize,
     cells: Vec<Vec<u8>>,
     colors: Vec<Vec<Color>>,
+    bg_colors: Vec<Vec<Option<Color>>>,
     priority: Vec<Vec<u8>>,
     /// Text overlay entries: (col, row, char, color, priority).
     text_overlay: Vec<(usize, usize, char, Color, u8)>,
@@ -71,8 +76,16 @@ impl BrailleCanvas {
             height,
             cells: vec![vec![0u8; width]; height],
             colors: vec![vec![COASTLINE_PRIMARY; width]; height],
+            bg_colors: vec![vec![None; width]; height],
             priority: vec![vec![0u8; width]; height],
             text_overlay: Vec::new(),
+        }
+    }
+
+    /// Set the background color for a terminal cell.
+    pub fn set_cell_bg(&mut self, col: usize, row: usize, bg: Color) {
+        if col < self.width && row < self.height {
+            self.bg_colors[row][col] = Some(bg);
         }
     }
 
@@ -229,10 +242,11 @@ impl BrailleCanvas {
         for row in 0..self.height {
             let mut spans = Vec::with_capacity(self.width);
             for col in 0..self.width {
+                let bg = self.bg_colors[row][col].unwrap_or(theme::BG);
                 if let Some(&(ch, color)) = text_map.get(&(col, row)) {
                     spans.push(Span::styled(
                         ch.to_string(),
-                        Style::default().fg(color).bg(theme::BG),
+                        Style::default().fg(color).bg(bg),
                     ));
                 } else {
                     let mask = self.cells[row][col];
@@ -240,7 +254,7 @@ impl BrailleCanvas {
                     let fg = self.colors[row][col];
                     spans.push(Span::styled(
                         ch.to_string(),
-                        Style::default().fg(fg).bg(theme::BG),
+                        Style::default().fg(fg).bg(bg),
                     ));
                 }
             }
@@ -370,10 +384,11 @@ pub fn country_center(iso2: &str) -> Option<(f64, f64)> {
 
 // ─── Coastline Data ─────────────────────────────────────────────────
 
-/// Parsed coastline data with primary (major) and secondary (detail) layers.
+/// Parsed coastline data with primary (major), secondary (detail), and border layers.
 struct CoastlineData {
     primary: Vec<Vec<(f64, f64)>>,
     secondary: Vec<Vec<(f64, f64)>>,
+    borders: Vec<Vec<(f64, f64)>>,
 }
 
 /// Load world coastlines from the embedded JSON asset file.
@@ -384,7 +399,7 @@ fn world_coastlines() -> &'static CoastlineData {
     COASTLINES.get_or_init(|| {
         let data = include_str!("../../assets/world.json");
 
-        // Try new layered format: {"primary": [...], "secondary": [...]}
+        // Try new layered format: {"primary": [...], "secondary": [...], "borders": [...]}
         if let Ok(layered) = serde_json::from_str::<serde_json::Value>(data) {
             if layered.is_object() && layered.get("primary").is_some() {
                 let parse_layer = |val: &serde_json::Value| -> Vec<Vec<(f64, f64)>> {
@@ -402,7 +417,11 @@ fn world_coastlines() -> &'static CoastlineData {
                     .get("secondary")
                     .map(|v| parse_layer(v))
                     .unwrap_or_default();
-                return CoastlineData { primary, secondary };
+                let borders = layered
+                    .get("borders")
+                    .map(|v| parse_layer(v))
+                    .unwrap_or_default();
+                return CoastlineData { primary, secondary, borders };
             }
         }
 
@@ -415,6 +434,7 @@ fn world_coastlines() -> &'static CoastlineData {
         CoastlineData {
             primary: all,
             secondary: Vec::new(),
+            borders: Vec::new(),
         }
     })
 }
@@ -530,6 +550,40 @@ fn draw_coastline_layer(
     }
 }
 
+// ─── Land Fill ──────────────────────────────────────────────────────
+
+/// Simple land fill: for each row, find cells that have coastline/border
+/// dots and flood-fill between them with a subtle background.
+/// This is a simplified scanline approach — it won't be perfect but gives
+/// a visual hint of land vs ocean.
+fn apply_land_fill(canvas: &mut BrailleCanvas) {
+    // For each row, identify cells that have any drawn content (coastline/border dots).
+    // Between pairs of "boundary" cells, apply a subtle background tint.
+    for row in 0..canvas.height {
+        let mut boundary_cols: Vec<usize> = Vec::new();
+        for col in 0..canvas.width {
+            if canvas.cells[row][col] != 0 {
+                boundary_cols.push(col);
+            }
+        }
+
+        // Fill between adjacent boundary cells that are close together
+        // (within ~60% of width to avoid ocean fills across the whole map)
+        let max_gap = canvas.width / 3;
+        for window in boundary_cols.windows(2) {
+            let (a, b) = (window[0], window[1]);
+            let gap = b - a;
+            if gap > 1 && gap < max_gap {
+                for col in (a + 1)..b {
+                    if canvas.bg_colors[row][col].is_none() {
+                        canvas.set_cell_bg(col, row, LAND_FILL_COLOR);
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ─── Main Draw Function ─────────────────────────────────────────────
 
 /// Draw a full world map with Mercator projection, coastlines, and
@@ -570,28 +624,43 @@ pub fn draw_world_map(
     // ── Draw grid (lowest priority) ─────────────────────────────
     draw_grid(&mut canvas, px_w, px_h);
 
-    // ── Draw coastlines — two layers ────────────────────────────
+    // ── Draw coastlines and borders — three layers ─────────────
     let coastlines = world_coastlines();
 
-    // Secondary layer first (lower priority, dimmer)
+    // Country borders (lowest coastline priority — subtle)
+    if !coastlines.borders.is_empty() {
+        draw_coastline_layer(
+            &mut canvas,
+            &coastlines.borders,
+            BORDER_COLOR,
+            1,
+            px_w,
+            px_h,
+        );
+    }
+
+    // Secondary coastlines (lower priority, dimmer)
     draw_coastline_layer(
         &mut canvas,
         &coastlines.secondary,
         COASTLINE_SECONDARY,
-        1,
+        2,
         px_w,
         px_h,
     );
 
-    // Primary layer on top (higher priority, brighter)
+    // Primary coastlines on top (highest coastline priority, brighter)
     draw_coastline_layer(
         &mut canvas,
         &coastlines.primary,
         COASTLINE_PRIMARY,
-        1,
+        2,
         px_w,
         px_h,
     );
+
+    // ── Land fill (subtle background tint for land masses) ─────
+    apply_land_fill(&mut canvas);
 
     // ── Continent labels ────────────────────────────────────────
     for &(label, lon, lat) in CONTINENT_LABELS {

@@ -11,6 +11,8 @@ use crate::data::protocols::{self, AppProtocol};
 use crate::data::servers::{self, ServerInfo};
 use crate::data::alerts::{AlertEngine, AlertSeverity};
 use crate::data::discovery::LanDevice;
+use crate::data::outbound::{AppOutboundStats, OutboundTracker};
+use crate::data::wire::WireTracker;
 use crate::score;
 
 // ─── View enum ────────────────────────────────────────────────────
@@ -24,10 +26,12 @@ pub enum View {
     Geography,
     Topology,
     SystemVitals,
+    Outbound,
+    Wire,
 }
 
 impl View {
-    pub const ALL: [View; 8] = [
+    pub const ALL: [View; 10] = [
         View::CommandCenter,
         View::AttackRadar,
         View::Alerts,
@@ -36,6 +40,8 @@ impl View {
         View::Geography,
         View::Topology,
         View::SystemVitals,
+        View::Outbound,
+        View::Wire,
     ];
 
     pub fn next(self) -> Self {
@@ -58,6 +64,8 @@ impl View {
             Self::Geography => "Geography",
             Self::Topology => "Topology",
             Self::SystemVitals => "System Vitals",
+            Self::Outbound => "Outbound",
+            Self::Wire => "Wire",
         }
     }
 
@@ -71,6 +79,8 @@ impl View {
             Self::Geography => 5,
             Self::Topology => 6,
             Self::SystemVitals => 7,
+            Self::Outbound => 8,
+            Self::Wire => 9,
         }
     }
 
@@ -169,6 +179,13 @@ pub struct App {
     // Alert engine
     pub alert_engine: AlertEngine,
 
+    // Outbound tracking
+    pub outbound_tracker: OutboundTracker,
+    pub outbound_stats: Vec<AppOutboundStats>,
+
+    // Wire tracking (Wireshark-like event log)
+    pub wire_tracker: WireTracker,
+
     // Data collection
     system_collector: Option<data::system::SystemCollector>,
     tick_start: Instant,
@@ -244,6 +261,11 @@ impl App {
             top_attacker_countries: Vec::new(),
 
             alert_engine: AlertEngine::new(),
+
+            outbound_tracker: OutboundTracker::new(),
+            outbound_stats: Vec::new(),
+
+            wire_tracker: WireTracker::new(),
 
             system_collector: Some(data::system::SystemCollector::new()),
             tick_start: Instant::now(),
@@ -477,6 +499,27 @@ impl App {
             if elapsed_secs >= 3600 {
                 self.score_delta_1h = 0;
             }
+        }
+
+        // ── Wire tracking (every tick — detect new/closed/state changes) ──
+        self.wire_tracker.process(
+            &self.connections,
+            &self.geoip_cache,
+            &self.dns_cache,
+        );
+
+        // ── Outbound tracking (every 2 ticks) ────────────────────────
+        if self.tick_count % 2 == 0 {
+            self.outbound_stats = self.outbound_tracker.process(
+                &self.connections,
+                &self.geoip_cache,
+                &self.dns_cache,
+            );
+        }
+
+        // Prune outbound tracker hourly
+        if self.tick_count % 3600 == 0 {
+            self.outbound_tracker.prune();
         }
 
         // ── Alert engine ────────────────────────────────────────────

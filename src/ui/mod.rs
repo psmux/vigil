@@ -9,6 +9,8 @@ pub mod network_pulse;
 pub mod geography;
 pub mod topology;
 pub mod system_vitals;
+pub mod outbound;
+pub mod wire;
 
 use ratatui::layout::{Constraint, Layout, Direction};
 use ratatui::Frame;
@@ -42,6 +44,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         View::Geography    => geography::draw(f, app, chunks[2]),
         View::Topology     => topology::draw(f, app, chunks[2]),
         View::SystemVitals => system_vitals::draw(f, app, chunks[2]),
+        View::Outbound     => outbound::draw(f, app, chunks[2]),
+        View::Wire         => wire::draw(f, app, chunks[2]),
     }
 
     status_bar::draw(f, app, chunks[3]);
@@ -65,7 +69,7 @@ fn draw_help_overlay(f: &mut Frame, area: ratatui::layout::Rect) {
     let text = Style::default().fg(Color::Rgb(180,190,210));
     let dim = Style::default().fg(Color::Rgb(80,90,110));
     let lines = vec![
-        Line::from(vec![Span::styled("  1-8   ", gold), Span::styled("Switch views", text)]),
+        Line::from(vec![Span::styled("  1-0   ", gold), Span::styled("Switch views (0=Wire)", text)]),
         Line::from(vec![Span::styled("  Tab   ", gold), Span::styled("Next view", text)]),
         Line::from(vec![Span::styled("  j/k   ", gold), Span::styled("Scroll up/down", text)]),
         Line::from(vec![Span::styled("  z     ", gold), Span::styled("Pause/resume", text)]),

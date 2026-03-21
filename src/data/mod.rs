@@ -13,6 +13,8 @@ pub mod alerts;
 pub mod protocols;
 pub mod servers;
 pub mod discovery;
+pub mod outbound;
+pub mod wire;
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
@@ -99,7 +101,7 @@ impl TcpState {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Protocol { Tcp, Udp }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -22,6 +22,8 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
         KeyCode::Char('6') => app.view = View::Geography,
         KeyCode::Char('7') => app.view = View::Topology,
         KeyCode::Char('8') => app.view = View::SystemVitals,
+        KeyCode::Char('9') => app.view = View::Outbound,
+        KeyCode::Char('0') => app.view = View::Wire,
 
         // Tab cycling
         KeyCode::Tab => {
