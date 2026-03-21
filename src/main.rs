@@ -61,6 +61,9 @@ fn main() -> anyhow::Result<()> {
         // Draw
         terminal.draw(|f| ui::draw(f, &app))?;
 
+        // Flush TerminalMap ANSI writes AFTER ratatui's buffer flush
+        widgets::terminal_map::flush_pending_maps();
+
         // Poll for events with a 50ms timeout
         let timeout = Duration::from_millis(50);
         if event::poll(timeout)? {

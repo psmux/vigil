@@ -1,6 +1,6 @@
-//! TerminalMap integration — renders OSM vector tile maps by writing
-//! the ANSI frame directly to the terminal (same as TerminalMap standalone),
-//! bypassing ratatui's widget system for the map area to avoid conversion loss.
+//! TerminalMap integration — renders OSM vector tiles in a background thread.
+//! The ANSI frame is written directly to the terminal AFTER ratatui flushes,
+//! so it doesn't get overwritten by ratatui's buffer.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex, LazyLock};
@@ -9,7 +9,7 @@ use std::thread;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::theme;
@@ -52,13 +52,75 @@ pub fn country_center(iso2: &str) -> Option<(f64, f64)> {
         .map(|(_, lon, lat)| (*lon, *lat))
 }
 
-// ─── Cached ANSI Frame ──────────────────────────────────────────────
+// ─── Pending ANSI Writes (flushed after ratatui) ────────────────────
 
-struct CachedFrame {
-    cols: u16,
-    rows: u16,
+/// Queued ANSI writes: (origin_x, origin_y, ansi_lines, footer).
+/// Written to stdout in `flush_pending_maps()` AFTER terminal.draw().
+static PENDING_WRITES: LazyLock<Mutex<Vec<PendingMapWrite>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
+struct PendingMapWrite {
+    origin_x: u16,
+    origin_y: u16,
+    map_rows: u16,
+    map_cols: u16,
     ansi: String,
     footer: String,
+}
+
+/// Call this AFTER terminal.draw() to flush pending map ANSI writes.
+/// This ensures ratatui's buffer is flushed first, then we overwrite
+/// the map areas with TerminalMap's direct ANSI output.
+pub fn flush_pending_maps() {
+    let writes = {
+        let mut guard = match PENDING_WRITES.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        std::mem::take(&mut *guard)
+    };
+
+    if writes.is_empty() {
+        return;
+    }
+
+    let mut stdout = std::io::stdout();
+
+    for pw in &writes {
+        for (row_idx, line) in pw.ansi.split('\n').enumerate() {
+            let line = line.trim_end_matches('\r');
+            if row_idx >= pw.map_rows as usize {
+                break;
+            }
+            let _ = crossterm::execute!(
+                stdout,
+                crossterm::cursor::MoveTo(pw.origin_x, pw.origin_y + row_idx as u16)
+            );
+            let _ = write!(stdout, "{}", line);
+        }
+
+        // Footer
+        if !pw.footer.is_empty() {
+            let footer_y = pw.origin_y + pw.map_rows;
+            let _ = crossterm::execute!(
+                stdout,
+                crossterm::cursor::MoveTo(pw.origin_x, footer_y)
+            );
+            let truncated: String = pw.footer.chars().take(pw.map_cols as usize).collect();
+            let _ = write!(stdout, "\x1B[38;5;243m{}\x1B[0m", truncated);
+        }
+    }
+
+    let _ = stdout.flush();
+}
+
+// ─── Cached Frame + Background Thread ───────────────────────────────
+
+struct CachedFrame {
+    ansi: String,
+    footer: String,
+    cols: u16,
+    rows: u16,
 }
 
 static MAP_FRAME: LazyLock<Arc<Mutex<Option<CachedFrame>>>> =
@@ -72,10 +134,8 @@ static MAP_STARTED: LazyLock<Arc<std::sync::atomic::AtomicBool>> =
 
 enum MapCmd {
     Resize(u16, u16),
-    UpdateMarkers(Vec<(f64, f64, u8, bool)>), // lat, lon, color, pulsing
+    UpdateMarkers(Vec<(f64, f64, u8, bool)>),
 }
-
-// ─── Background Renderer ────────────────────────────────────────────
 
 fn ensure_started() {
     if MAP_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -107,23 +167,20 @@ fn ensure_started() {
                 Err(_) => return,
             };
 
-            let mut cur_cols: u16 = 120;
-            let mut cur_rows: u16 = 30;
-            map.set_size(cur_cols as usize * 2, cur_rows as usize * 4);
+            let mut cur_c: u16 = 120;
+            let mut cur_r: u16 = 30;
+            map.set_size(cur_c as usize * 2, cur_r as usize * 4);
             map.fit_world();
-
-            // Initial render
-            do_render(&map, cur_cols, cur_rows, &frame_out).await;
+            do_render(&map, cur_c, cur_r, &frame_out).await;
 
             loop {
                 let mut needs_render = false;
-
                 while let Ok(cmd) = rx.try_recv() {
                     match cmd {
                         MapCmd::Resize(c, r) => {
-                            if c != cur_cols || r != cur_rows {
-                                cur_cols = c;
-                                cur_rows = r;
+                            if c != cur_c || r != cur_r {
+                                cur_c = c;
+                                cur_r = r;
                                 map.set_size(c as usize * 2, r as usize * 4);
                                 map.fit_world();
                                 needs_render = true;
@@ -147,15 +204,14 @@ fn ensure_started() {
                     }
                 }
 
-                // Advance tick for animations
                 map.advance_tick();
-                let camera_moved = map.update_camera();
-                if map.needs_animation_redraw() || camera_moved {
+                let cam = map.update_camera();
+                if map.needs_animation_redraw() || cam {
                     needs_render = true;
                 }
 
                 if needs_render {
-                    do_render(&map, cur_cols, cur_rows, &frame_out).await;
+                    do_render(&map, cur_c, cur_r, &frame_out).await;
                 }
 
                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -173,7 +229,7 @@ async fn do_render(
     if let Ok(ansi) = map.render().await {
         let footer = map.footer();
         if let Ok(mut guard) = out.lock() {
-            *guard = Some(CachedFrame { cols, rows, ansi, footer });
+            *guard = Some(CachedFrame { ansi, footer, cols, rows });
         }
     }
 }
@@ -188,9 +244,6 @@ fn send_cmd(cmd: MapCmd) {
 
 // ─── Public Draw Function ───────────────────────────────────────────
 
-/// Draw the TerminalMap. Writes the ANSI frame directly to stdout
-/// at the correct position (same technique as TerminalMap standalone),
-/// then renders the border/title/footer via ratatui.
 pub fn draw_terminal_map(
     f: &mut Frame,
     area: Rect,
@@ -200,7 +253,6 @@ pub fn draw_terminal_map(
 ) {
     ensure_started();
 
-    // Draw the border via ratatui
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
@@ -217,8 +269,9 @@ pub fn draw_terminal_map(
         return;
     }
 
-    // Send resize + markers to background thread
-    // Reserve 1 row at bottom for the footer/status
+    // Clear the inner area so ratatui doesn't leave stale content
+    f.render_widget(Clear, inner);
+
     let map_rows = inner.height.saturating_sub(1);
     send_cmd(MapCmd::Resize(inner.width, map_rows));
 
@@ -234,53 +287,31 @@ pub fn draw_terminal_map(
         send_cmd(MapCmd::UpdateMarkers(markers));
     }
 
-    // Get cached frame
+    // Queue the ANSI write for after ratatui flushes
     let cached = MAP_FRAME.lock().ok().and_then(|guard| {
         guard.as_ref().map(|cf| (cf.ansi.clone(), cf.footer.clone()))
     });
 
     match cached {
         Some((ansi, footer)) => {
-            // Write the ANSI map frame directly to stdout at the inner area position.
-            // This bypasses ratatui for the map content — same as TerminalMap standalone.
-            let mut stdout = std::io::stdout();
-            let origin_x = inner.x;
-            let origin_y = inner.y;
-
-            // Split ANSI frame into lines and write each at the correct row
-            for (row_idx, line) in ansi.split('\n').enumerate() {
-                let line = line.trim_end_matches('\r');
-                if row_idx >= map_rows as usize {
-                    break;
-                }
-                let _ = crossterm::execute!(
-                    stdout,
-                    crossterm::cursor::MoveTo(origin_x, origin_y + row_idx as u16)
-                );
-                let _ = write!(stdout, "{}", line);
+            // Queue for post-ratatui flush
+            if let Ok(mut pending) = PENDING_WRITES.lock() {
+                pending.push(PendingMapWrite {
+                    origin_x: inner.x,
+                    origin_y: inner.y,
+                    map_rows,
+                    map_cols: inner.width,
+                    ansi,
+                    footer,
+                });
             }
-
-            // Footer line at the bottom of the inner area
-            let footer_y = origin_y + map_rows;
-            let _ = crossterm::execute!(
-                stdout,
-                crossterm::cursor::MoveTo(origin_x, footer_y)
-            );
-            // Dim footer
-            let _ = write!(stdout, "\x1B[38;5;243m{}\x1B[0m", &footer[..footer.len().min(inner.width as usize)]);
-            let _ = stdout.flush();
         }
         None => {
-            // Loading state via ratatui
             let loading = Paragraph::new(vec![
                 Line::from(""),
                 Line::from(Span::styled(
                     "  \u{231B} Loading TerminalMap...",
                     Style::default().fg(theme::TEXT_DIM),
-                )),
-                Line::from(Span::styled(
-                    "  Initializing OSM vector tiles",
-                    Style::default().fg(theme::TEXT_MUTED),
                 )),
             ]).style(Style::default().bg(theme::BG));
             f.render_widget(loading, inner);
