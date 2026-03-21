@@ -16,13 +16,19 @@ use crate::theme;
 /// The active view is highlighted with `TAB_ACTIVE_FG` on `TAB_ACTIVE_BG` and bold.
 /// Inactive tabs use `TEXT_DIM` on `TAB_BG`.
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
-    let short_labels = ["Cmd", "Atk", "Alert", "Door", "Net", "Geo", "Topo", "Sys", "Out", "Wire"];
+    let short_labels = ["Cmd", "Atk", "Alert", "Door", "Net", "Geo", "Topo", "Sys", "Out", "Wire", "Sig"];
 
     let mut spans: Vec<Span> = Vec::new();
 
     for (i, view) in View::ALL.iter().enumerate() {
-        // Keys 1-9,0 map to views 1-10
-        let key = if i == 9 { "0".to_string() } else { format!("{}", i + 1) };
+        // Keys 1-9,0,- map to views 1-11
+        let key = if i == 9 {
+            "0".to_string()
+        } else if i == 10 {
+            "-".to_string()
+        } else {
+            format!("{}", i + 1)
+        };
         let label = format!("[{}:{}]", key, short_labels[i]);
 
         let is_active = app.view == *view;

@@ -32,6 +32,7 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
         KeyCode::Char('8') => { app.view = View::SystemVitals; return; }
         KeyCode::Char('9') => { app.view = View::Outbound; return; }
         KeyCode::Char('0') => { app.view = View::Wire; return; }
+        KeyCode::Char('-') => { app.view = View::Signals; return; }
 
         KeyCode::Tab => { app.view = app.view.next(); app.scroll_offset = 0; return; }
         KeyCode::BackTab => { app.view = app.view.prev(); app.scroll_offset = 0; return; }

@@ -8,3 +8,4 @@ pub mod terminal_map;
 pub mod donut;
 pub mod line_chart;
 pub mod port_flow;
+pub mod tag_cloud;

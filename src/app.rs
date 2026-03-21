@@ -12,6 +12,7 @@ use crate::data::servers::{self, ServerInfo};
 use crate::data::alerts::{AlertEngine, AlertSeverity};
 use crate::data::discovery::LanDevice;
 use crate::data::outbound::{AppOutboundStats, OutboundTracker};
+use crate::data::signals::{SignalTag, SignalTracker};
 use crate::data::wire::WireTracker;
 use crate::score;
 
@@ -28,10 +29,11 @@ pub enum View {
     SystemVitals,
     Outbound,
     Wire,
+    Signals,
 }
 
 impl View {
-    pub const ALL: [View; 10] = [
+    pub const ALL: [View; 11] = [
         View::CommandCenter,
         View::AttackRadar,
         View::Alerts,
@@ -42,6 +44,7 @@ impl View {
         View::SystemVitals,
         View::Outbound,
         View::Wire,
+        View::Signals,
     ];
 
     pub fn next(self) -> Self {
@@ -66,6 +69,7 @@ impl View {
             Self::SystemVitals => "System Vitals",
             Self::Outbound => "Outbound",
             Self::Wire => "Wire",
+            Self::Signals => "Signals",
         }
     }
 
@@ -81,6 +85,7 @@ impl View {
             Self::SystemVitals => 7,
             Self::Outbound => 8,
             Self::Wire => 9,
+            Self::Signals => 10,
         }
     }
 
@@ -183,6 +188,11 @@ pub struct App {
     pub outbound_tracker: OutboundTracker,
     pub outbound_stats: Vec<AppOutboundStats>,
 
+    // Signal tracking (live tag cloud)
+    pub signal_tracker: SignalTracker,
+    /// Cached sorted tags for the UI — rebuilt every 2 ticks.
+    pub signal_tags: Vec<SignalTag>,
+
     // Wire tracking (Wireshark-like event log)
     pub wire_tracker: WireTracker,
     /// Currently selected event index in the Wire view.
@@ -268,6 +278,9 @@ impl App {
 
             outbound_tracker: OutboundTracker::new(),
             outbound_stats: Vec::new(),
+
+            signal_tracker: SignalTracker::new(),
+            signal_tags: Vec::new(),
 
             wire_tracker: WireTracker::new(),
             wire_selected: 0,
@@ -535,6 +548,25 @@ impl App {
                 &self.geoip_cache,
                 &self.dns_cache,
             );
+        }
+
+        // ── Signal tracking (every 2 ticks) ─────────────────────────
+        if self.tick_count % 2 == 0 {
+            let attacks_recent = self.attacks.iter()
+                .rev()
+                .take_while(|a| {
+                    let age = (chrono::Utc::now() - a.timestamp).num_seconds();
+                    age < 10
+                })
+                .count();
+            self.signal_tracker.process(
+                &self.connections,
+                &self.wire_tracker,
+                &self.geoip_cache,
+                &self.dns_cache,
+                attacks_recent,
+            );
+            self.signal_tags = self.signal_tracker.tags();
         }
 
         // ── Outbound tracking (every 2 ticks) ────────────────────────

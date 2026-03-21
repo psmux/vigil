@@ -10,6 +10,7 @@ pub mod geography;
 pub mod topology;
 pub mod system_vitals;
 pub mod outbound;
+pub mod signals;
 pub mod wire;
 
 use ratatui::layout::{Constraint, Layout, Direction};
@@ -46,6 +47,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         View::SystemVitals => system_vitals::draw(f, app, chunks[2]),
         View::Outbound     => outbound::draw(f, app, chunks[2]),
         View::Wire         => wire::draw(f, app, chunks[2]),
+        View::Signals      => signals::draw(f, app, chunks[2]),
     }
 
     status_bar::draw(f, app, chunks[3]);
@@ -95,6 +97,7 @@ fn draw_help_overlay(f: &mut Frame, area: ratatui::layout::Rect) {
         Line::from(Span::styled("  Views", section)),
         Line::from(vec![Span::styled("  1", gold), Span::styled(" Cmd  ", text), Span::styled("2", gold), Span::styled(" Atk  ", text), Span::styled("3", gold), Span::styled(" Alert  ", text), Span::styled("4", gold), Span::styled(" Door  ", text), Span::styled("5", gold), Span::styled(" Net", text)]),
         Line::from(vec![Span::styled("  6", gold), Span::styled(" Geo  ", text), Span::styled("7", gold), Span::styled(" Topo ", text), Span::styled("8", gold), Span::styled(" Sys    ", text), Span::styled("9", gold), Span::styled(" Out   ", text), Span::styled("0", gold), Span::styled(" Wire", text)]),
+        Line::from(vec![Span::styled("  -", gold), Span::styled(" Signals (tag cloud)", text)]),
         Line::from(""),
         Line::from(Span::styled("  Press ? or Esc to close", dim)),
     ];
