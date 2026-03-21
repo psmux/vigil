@@ -86,18 +86,31 @@ impl OutboundTracker {
         let mut app_conns: HashMap<String, Vec<&Connection>> = HashMap::new();
 
         for conn in connections {
+            // Skip dead/closing states — only show LIVE outbound connections
+            // TIME_WAIT, CLOSE, CLOSE_WAIT are kernel-owned with no real process
+            match conn.state {
+                TcpState::TimeWait | TcpState::Close | TcpState::CloseWait
+                | TcpState::LastAck | TcpState::Closing => continue,
+                _ => {}
+            }
+
             // Include Outbound and Unknown-direction established connections
-            let dominated_outbound = conn.direction == Direction::Outbound
+            let is_outbound = conn.direction == Direction::Outbound
                 || (conn.direction == Direction::Unknown
                     && conn.state == TcpState::Established);
 
-            if !dominated_outbound {
+            if !is_outbound {
                 continue;
             }
 
             // Skip loopback and local
             if conn.remote_addr.ip().is_loopback() {
                 continue;
+            }
+
+            // Skip kernel-owned sockets with no real process
+            if let Some(ref name) = conn.process_name {
+                if name.starts_with('[') { continue; }
             }
 
             let app_name = conn
