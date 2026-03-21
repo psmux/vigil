@@ -84,19 +84,7 @@ pub fn flush_pending_maps(render: bool) {
             let _ = write!(stdout, "{}\x1B[0m", clipped);
         }
 
-        // Help bar — clipped
-        let help_y = pw.origin_y + pw.map_rows;
-        let _ = crossterm::execute!(stdout, crossterm::cursor::MoveTo(pw.origin_x, help_y));
-        let help_trunc: String = strip_ansi_truncate(&pw.help_line, max_col);
-        let _ = write!(stdout, "{}\x1B[0m", help_trunc);
-
-        // Status bar — clipped
-        let status_y = help_y + 1;
-        if status_y < pw.origin_y + pw.map_rows + 2 {
-            let _ = crossterm::execute!(stdout, crossterm::cursor::MoveTo(pw.origin_x, status_y));
-            let status_trunc: String = pw.status_line.chars().take(max_col).collect();
-            let _ = write!(stdout, "\x1B[38;5;243m{}\x1B[0m", status_trunc);
-        }
+        // Status bar disabled — can re-enable later if needed
     }
     let _ = stdout.flush();
 }
@@ -297,8 +285,7 @@ pub fn draw_terminal_map(
     if inner.width < 4 || inner.height < 4 { return; }
 
     // Reserve 2 rows for footer (help + status), like standalone
-    let footer_rows = 2u16;
-    let map_rows = inner.height.saturating_sub(footer_rows);
+    let map_rows = inner.height;
 
     send_map_cmd(MapCmd::Resize(inner.width, map_rows));
 
