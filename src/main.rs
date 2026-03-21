@@ -61,8 +61,9 @@ fn main() -> anyhow::Result<()> {
         // Draw
         terminal.draw(|f| ui::draw(f, &app))?;
 
-        // Flush TerminalMap ANSI writes AFTER ratatui's buffer flush
-        widgets::terminal_map::flush_pending_maps();
+        // Flush TerminalMap ANSI writes AFTER ratatui's buffer flush.
+        // Only render when on Attack Radar — discard otherwise to prevent leak.
+        widgets::terminal_map::flush_pending_maps(app.view == app::View::AttackRadar);
 
         // Poll for events with a 50ms timeout
         let timeout = Duration::from_millis(50);

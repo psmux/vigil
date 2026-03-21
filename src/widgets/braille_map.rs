@@ -624,9 +624,6 @@ fn get_base_map(w: usize, h: usize) -> BrailleCanvas {
     draw_coastline_layer(&mut canvas, &coastlines.secondary, COASTLINE_SECONDARY, 2, px_w, px_h);
     draw_coastline_layer(&mut canvas, &coastlines.primary, COASTLINE_PRIMARY, 2, px_w, px_h);
 
-    // Land fill
-    apply_land_fill(&mut canvas);
-
     // Continent labels
     for &(label, lon, lat) in CONTINENT_LABELS {
         let (col, row) = project_cell(lon, lat, w, h);

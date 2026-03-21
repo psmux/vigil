@@ -58,8 +58,9 @@ struct PendingMapWrite {
 static PENDING_WRITES: LazyLock<Mutex<Vec<PendingMapWrite>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
-/// Call AFTER terminal.draw() to render maps on top of ratatui output.
-pub fn flush_pending_maps() {
+/// Call AFTER terminal.draw(). If `render` is true, writes ANSI to stdout.
+/// If false, just drains the queue (prevents stale writes on view switch).
+pub fn flush_pending_maps(render: bool) {
     let writes = {
         let mut guard = match PENDING_WRITES.lock() {
             Ok(g) => g,
@@ -67,30 +68,61 @@ pub fn flush_pending_maps() {
         };
         std::mem::take(&mut *guard)
     };
-    if writes.is_empty() { return; }
+    if writes.is_empty() || !render { return; }
 
     let mut stdout = std::io::stdout();
     for pw in &writes {
-        // Write each line of the ANSI map frame
+        let max_col = pw.map_cols as usize;
+
+        // Write each line of the ANSI map frame — clipped to widget width
         for (i, line) in pw.ansi.split('\n').enumerate() {
             let line = line.trim_end_matches('\r');
             if i >= pw.map_rows as usize { break; }
             let _ = crossterm::execute!(stdout, crossterm::cursor::MoveTo(pw.origin_x, pw.origin_y + i as u16));
-            let _ = write!(stdout, "\x1B[K{}", line); // clear line first
+            // Write the line content (no \x1B[K — don't clear past our boundary)
+            let _ = write!(stdout, "{}", line);
+            // Reset color at end of each line to prevent bleed
+            let _ = write!(stdout, "\x1B[0m");
         }
-        // Help bar
+
+        // Help bar — clipped
         let help_y = pw.origin_y + pw.map_rows;
         let _ = crossterm::execute!(stdout, crossterm::cursor::MoveTo(pw.origin_x, help_y));
-        let _ = write!(stdout, "\x1B[K{}", &pw.help_line);
-        // Status bar
+        let help_trunc: String = strip_ansi_truncate(&pw.help_line, max_col);
+        let _ = write!(stdout, "{}\x1B[0m", help_trunc);
+
+        // Status bar — clipped
         let status_y = help_y + 1;
         if status_y < pw.origin_y + pw.map_rows + 2 {
             let _ = crossterm::execute!(stdout, crossterm::cursor::MoveTo(pw.origin_x, status_y));
-            let trunc: String = pw.status_line.chars().take(pw.map_cols as usize).collect();
-            let _ = write!(stdout, "\x1B[K\x1B[38;5;243m{}\x1B[0m", trunc);
+            let status_trunc: String = pw.status_line.chars().take(max_col).collect();
+            let _ = write!(stdout, "\x1B[38;5;243m{}\x1B[0m", status_trunc);
         }
     }
     let _ = stdout.flush();
+}
+
+/// Truncate an ANSI string to approximately max_visible visible characters.
+/// Passes through escape sequences without counting them toward the limit.
+fn strip_ansi_truncate(s: &str, max_visible: usize) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut visible = 0usize;
+    let mut in_escape = false;
+
+    for ch in s.chars() {
+        if in_escape {
+            result.push(ch);
+            if ch.is_ascii_alphabetic() { in_escape = false; }
+        } else if ch == '\x1B' {
+            in_escape = true;
+            result.push(ch);
+        } else {
+            if visible >= max_visible { break; }
+            result.push(ch);
+            visible += 1;
+        }
+    }
+    result
 }
 
 // ─── Cached Frame ───────────────────────────────────────────────────
