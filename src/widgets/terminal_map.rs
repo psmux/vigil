@@ -179,6 +179,10 @@ fn ensure_started() {
             let mut cur_r: u16 = 30;
             map.set_size(cur_c as usize * 2, cur_r as usize * 4);
             map.fit_world();
+
+            // Auto-start globe tour immediately — no need to press 'g'
+            map.start_globe_tour_at(0.5);
+
             do_render(&map, &frame_out).await;
 
             loop {
@@ -225,17 +229,17 @@ fn ensure_started() {
                                 map.camera_mut().stop();
                             } else if !map.markers().is_empty() {
                                 // Tour markers — pan to where connections are
-                                map.start_marker_tour(2.0);
+                                map.start_marker_tour(1.0);
                             } else {
                                 // No markers — globe tour at continent level
-                                map.start_globe_tour_at(1.0);
+                                map.start_globe_tour_at(0.5);
                             }
                             needs_render = true;
                         }
                         MapCmd::ToggleGlobeTour => {
                             if map.camera().is_active() { map.camera_mut().stop(); }
                             else {
-                                map.start_globe_tour_at(1.0);
+                                map.start_globe_tour_at(0.5);
                             }
                             needs_render = true;
                         }
@@ -243,7 +247,7 @@ fn ensure_started() {
                             if map.camera().is_active() { map.camera_mut().stop(); }
                             else {
                                 // Zoom 2.0 = regional level, centers on where markers are
-                                map.start_marker_tour(2.0);
+                                map.start_marker_tour(1.0);
                             }
                             needs_render = true;
                         }
