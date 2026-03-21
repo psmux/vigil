@@ -3,9 +3,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKi
 use crate::app::{App, View};
 use crate::widgets::terminal_map::{self, MapCmd};
 
-/// Returns true if the current view has an interactive map.
+/// Returns true if the current view has an interactive TerminalMap.
+/// Only Attack Radar uses the interactive OSM map; other views use the static braille map.
 fn view_has_map(view: View) -> bool {
-    matches!(view, View::CommandCenter | View::AttackRadar | View::Geography | View::Outbound)
+    matches!(view, View::AttackRadar)
 }
 
 /// Master keyboard dispatcher — three layers:

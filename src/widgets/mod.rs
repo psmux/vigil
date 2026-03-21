@@ -3,6 +3,7 @@ pub mod gauge;
 pub mod bar_chart;
 pub mod kpi_badge;
 pub mod heatmap;
+pub mod braille_map;
 pub mod terminal_map;
 pub mod donut;
 pub mod line_chart;

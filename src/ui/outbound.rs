@@ -14,7 +14,7 @@ use crate::data::outbound::AppOutboundStats;
 use crate::format::format_bps;
 use crate::theme;
 use crate::widgets::bar_chart::{draw_bar_chart, BarItem};
-use crate::widgets::terminal_map::{country_center, draw_terminal_map, MapDot};
+use crate::widgets::braille_map::{country_center, draw_world_map, MapDot};
 
 // ─── Color constants ────────────────────────────────────────────────
 const OUTBOUND_COLOR: Color = Color::Rgb(0, 200, 160);
@@ -106,7 +106,7 @@ fn draw_outbound_map(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    draw_terminal_map(
+    draw_world_map(
         f,
         area,
         &dots,
