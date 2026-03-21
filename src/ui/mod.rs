@@ -59,8 +59,8 @@ fn draw_help_overlay(f: &mut Frame, area: ratatui::layout::Rect) {
     use ratatui::widgets::{Block, Borders, BorderType, Clear, Paragraph};
     use ratatui::style::{Color, Style, Modifier};
     use ratatui::text::{Line, Span};
-    let w = 52u16.min(area.width.saturating_sub(4));
-    let h = 22u16.min(area.height.saturating_sub(4));
+    let w = 56u16.min(area.width.saturating_sub(4));
+    let h = 30u16.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(w)) / 2;
     let y = (area.height.saturating_sub(h)) / 2;
     let popup = ratatui::layout::Rect::new(x, y, w, h);
@@ -70,20 +70,27 @@ fn draw_help_overlay(f: &mut Frame, area: ratatui::layout::Rect) {
     let dim = Style::default().fg(Color::Rgb(80,90,110));
     let section = Style::default().fg(Color::Rgb(100,160,255)).add_modifier(Modifier::BOLD);
     let lines = vec![
-        Line::from(Span::styled("  Navigation", section)),
+        Line::from(Span::styled("  Global", section)),
         Line::from(vec![Span::styled("  1-9, 0 ", gold), Span::styled("Switch views (0=Wire)", text)]),
-        Line::from(vec![Span::styled("  Tab    ", gold), Span::styled("Next view", text)]),
-        Line::from(vec![Span::styled("  j/k    ", gold), Span::styled("Scroll / select up/down", text)]),
-        Line::from(vec![Span::styled("  z      ", gold), Span::styled("Pause/resume data", text)]),
-        Line::from(vec![Span::styled("  a      ", gold), Span::styled("Mark alerts read", text)]),
+        Line::from(vec![Span::styled("  Tab    ", gold), Span::styled("Next / previous view", text)]),
+        Line::from(vec![Span::styled("  p      ", gold), Span::styled("Pause/resume data", text)]),
         Line::from(vec![Span::styled("  ?      ", gold), Span::styled("Toggle this help", text)]),
         Line::from(vec![Span::styled("  q      ", gold), Span::styled("Quit", text)]),
         Line::from(""),
+        Line::from(Span::styled("  Map Views (1,2,6,9)", section)),
+        Line::from(vec![Span::styled("  hjkl   ", gold), Span::styled("Pan the map", text)]),
+        Line::from(vec![Span::styled("  a / z  ", gold), Span::styled("Zoom in / out", text)]),
+        Line::from(vec![Span::styled("  scroll ", gold), Span::styled("Mouse scroll to zoom", text)]),
+        Line::from(vec![Span::styled("  c      ", gold), Span::styled("Toggle braille rendering", text)]),
+        Line::from(vec![Span::styled("  n      ", gold), Span::styled("Toggle labels", text)]),
+        Line::from(vec![Span::styled("  w      ", gold), Span::styled("Fit world view", text)]),
+        Line::from(vec![Span::styled("  g      ", gold), Span::styled("Globe tour", text)]),
+        Line::from(vec![Span::styled("  t      ", gold), Span::styled("Marker tour", text)]),
+        Line::from(""),
         Line::from(Span::styled("  Wire View (0)", section)),
-        Line::from(vec![Span::styled("  j/k    ", gold), Span::styled("Select event up/down", text)]),
-        Line::from(vec![Span::styled("  G      ", gold), Span::styled("Jump to latest (resume live)", text)]),
-        Line::from(vec![Span::styled("  Enter  ", gold), Span::styled("Expand/collapse detail section", text)]),
-        Line::from(vec![Span::styled("  z      ", gold), Span::styled("Pause capture", text)]),
+        Line::from(vec![Span::styled("  j/k    ", gold), Span::styled("Select event", text)]),
+        Line::from(vec![Span::styled("  G      ", gold), Span::styled("Jump to latest", text)]),
+        Line::from(vec![Span::styled("  Enter  ", gold), Span::styled("Expand/collapse detail", text)]),
         Line::from(""),
         Line::from(Span::styled("  Views", section)),
         Line::from(vec![Span::styled("  1", gold), Span::styled(" Cmd  ", text), Span::styled("2", gold), Span::styled(" Atk  ", text), Span::styled("3", gold), Span::styled(" Alert  ", text), Span::styled("4", gold), Span::styled(" Door  ", text), Span::styled("5", gold), Span::styled(" Net", text)]),

@@ -67,8 +67,11 @@ fn main() -> anyhow::Result<()> {
         // Poll for events with a 50ms timeout
         let timeout = Duration::from_millis(50);
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                input::handle_input(&mut app, key);
+            match event::read()? {
+                Event::Key(key) => input::handle_input(&mut app, key),
+                Event::Mouse(mouse) => input::handle_mouse(&app, mouse),
+                Event::Resize(_, _) => {} // ratatui + map thread handle this
+                _ => {}
             }
         }
 

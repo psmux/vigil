@@ -1,6 +1,5 @@
-//! TerminalMap integration — renders OSM vector tiles in a background thread.
-//! The ANSI frame is written directly to the terminal AFTER ratatui flushes,
-//! so it doesn't get overwritten by ratatui's buffer.
+//! TerminalMap integration — interactive OSM vector tile map with zoom, pan,
+//! labels, tours, mouse scroll. Renders ANSI directly after ratatui flush.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex, LazyLock};
@@ -9,7 +8,7 @@ use std::thread;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::theme;
@@ -25,7 +24,7 @@ pub struct MapDot {
     pub jitter_seed: u32,
 }
 
-// ─── Country Center Coordinates ─────────────────────────────────────
+// ─── Country Centers ────────────────────────────────────────────────
 
 pub const COUNTRY_COORDS: &[(&str, f64, f64)] = &[
     ("US", -98.0, 38.0),   ("CA", -106.0, 56.0),  ("MX", -102.0, 23.0),
@@ -46,18 +45,39 @@ pub const COUNTRY_COORDS: &[(&str, f64, f64)] = &[
 ];
 
 pub fn country_center(iso2: &str) -> Option<(f64, f64)> {
-    COUNTRY_COORDS
-        .iter()
+    COUNTRY_COORDS.iter()
         .find(|(code, _, _)| *code == iso2)
         .map(|(_, lon, lat)| (*lon, *lat))
 }
 
-// ─── Pending ANSI Writes (flushed after ratatui) ────────────────────
+// ─── Map Commands (sent from input.rs) ──────────────────────────────
 
-/// Queued ANSI writes: (origin_x, origin_y, ansi_lines, footer).
-/// Written to stdout in `flush_pending_maps()` AFTER terminal.draw().
-static PENDING_WRITES: LazyLock<Mutex<Vec<PendingMapWrite>>> =
-    LazyLock::new(|| Mutex::new(Vec::new()));
+pub enum MapCmd {
+    Resize(u16, u16),
+    UpdateMarkers(Vec<(f64, f64, u8, bool)>),
+    ZoomIn,
+    ZoomOut,
+    PanLeft,
+    PanRight,
+    PanUp,
+    PanDown,
+    ToggleBraille,
+    ToggleLabels,
+    FitWorld,
+    ToggleGlobeTour,
+    ToggleMarkerTour,
+}
+
+/// Send a command to the map background thread. Called from input.rs.
+pub fn send_map_cmd(cmd: MapCmd) {
+    if let Ok(guard) = MAP_TX.lock() {
+        if let Some(tx) = guard.as_ref() {
+            let _ = tx.send(cmd);
+        }
+    }
+}
+
+// ─── Pending ANSI Writes ────────────────────────────────────────────
 
 struct PendingMapWrite {
     origin_x: u16,
@@ -65,12 +85,14 @@ struct PendingMapWrite {
     map_rows: u16,
     map_cols: u16,
     ansi: String,
-    footer: String,
+    help_line: String,
+    status_line: String,
 }
 
-/// Call this AFTER terminal.draw() to flush pending map ANSI writes.
-/// This ensures ratatui's buffer is flushed first, then we overwrite
-/// the map areas with TerminalMap's direct ANSI output.
+static PENDING_WRITES: LazyLock<Mutex<Vec<PendingMapWrite>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// Call AFTER terminal.draw() to render maps on top of ratatui output.
 pub fn flush_pending_maps() {
     let writes = {
         let mut guard = match PENDING_WRITES.lock() {
@@ -79,68 +101,52 @@ pub fn flush_pending_maps() {
         };
         std::mem::take(&mut *guard)
     };
-
-    if writes.is_empty() {
-        return;
-    }
+    if writes.is_empty() { return; }
 
     let mut stdout = std::io::stdout();
-
     for pw in &writes {
-        for (row_idx, line) in pw.ansi.split('\n').enumerate() {
+        // Write each line of the ANSI map frame
+        for (i, line) in pw.ansi.split('\n').enumerate() {
             let line = line.trim_end_matches('\r');
-            if row_idx >= pw.map_rows as usize {
-                break;
-            }
-            let _ = crossterm::execute!(
-                stdout,
-                crossterm::cursor::MoveTo(pw.origin_x, pw.origin_y + row_idx as u16)
-            );
-            let _ = write!(stdout, "{}", line);
+            if i >= pw.map_rows as usize { break; }
+            let _ = crossterm::execute!(stdout, crossterm::cursor::MoveTo(pw.origin_x, pw.origin_y + i as u16));
+            let _ = write!(stdout, "\x1B[K{}", line); // clear line first
         }
-
-        // Footer
-        if !pw.footer.is_empty() {
-            let footer_y = pw.origin_y + pw.map_rows;
-            let _ = crossterm::execute!(
-                stdout,
-                crossterm::cursor::MoveTo(pw.origin_x, footer_y)
-            );
-            let truncated: String = pw.footer.chars().take(pw.map_cols as usize).collect();
-            let _ = write!(stdout, "\x1B[38;5;243m{}\x1B[0m", truncated);
+        // Help bar
+        let help_y = pw.origin_y + pw.map_rows;
+        let _ = crossterm::execute!(stdout, crossterm::cursor::MoveTo(pw.origin_x, help_y));
+        let _ = write!(stdout, "\x1B[K{}", &pw.help_line);
+        // Status bar
+        let status_y = help_y + 1;
+        if status_y < pw.origin_y + pw.map_rows + 2 {
+            let _ = crossterm::execute!(stdout, crossterm::cursor::MoveTo(pw.origin_x, status_y));
+            let trunc: String = pw.status_line.chars().take(pw.map_cols as usize).collect();
+            let _ = write!(stdout, "\x1B[K\x1B[38;5;243m{}\x1B[0m", trunc);
         }
     }
-
     let _ = stdout.flush();
 }
 
-// ─── Cached Frame + Background Thread ───────────────────────────────
+// ─── Cached Frame ───────────────────────────────────────────────────
 
 struct CachedFrame {
     ansi: String,
     footer: String,
-    cols: u16,
-    rows: u16,
+    camera_label: Option<String>,
+    camera_active: bool,
 }
 
 static MAP_FRAME: LazyLock<Arc<Mutex<Option<CachedFrame>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(None)));
-
 static MAP_TX: LazyLock<Arc<Mutex<Option<std::sync::mpsc::Sender<MapCmd>>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(None)));
-
 static MAP_STARTED: LazyLock<Arc<std::sync::atomic::AtomicBool>> =
     LazyLock::new(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
 
-enum MapCmd {
-    Resize(u16, u16),
-    UpdateMarkers(Vec<(f64, f64, u8, bool)>),
-}
+// ─── Background Thread ─────────────────────────────────────────────
 
 fn ensure_started() {
-    if MAP_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return;
-    }
+    if MAP_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
 
     let frame_out = Arc::clone(&*MAP_FRAME);
     let (tx, rx) = std::sync::mpsc::channel::<MapCmd>();
@@ -171,16 +177,16 @@ fn ensure_started() {
             let mut cur_r: u16 = 30;
             map.set_size(cur_c as usize * 2, cur_r as usize * 4);
             map.fit_world();
-            do_render(&map, cur_c, cur_r, &frame_out).await;
+            do_render(&map, &frame_out).await;
 
             loop {
                 let mut needs_render = false;
+
                 while let Ok(cmd) = rx.try_recv() {
                     match cmd {
                         MapCmd::Resize(c, r) => {
                             if c != cur_c || r != cur_r {
-                                cur_c = c;
-                                cur_r = r;
+                                cur_c = c; cur_r = r;
                                 map.set_size(c as usize * 2, r as usize * 4);
                                 map.fit_world();
                                 needs_render = true;
@@ -201,43 +207,47 @@ fn ensure_started() {
                             }
                             needs_render = true;
                         }
+                        MapCmd::ZoomIn => { map.zoom_by(map.config.zoom_step); needs_render = true; }
+                        MapCmd::ZoomOut => { map.zoom_by(-map.config.zoom_step); needs_render = true; }
+                        MapCmd::PanLeft => { map.move_by(0.0, -8.0 / 2.0_f64.powf(map.zoom)); needs_render = true; }
+                        MapCmd::PanRight => { map.move_by(0.0, 8.0 / 2.0_f64.powf(map.zoom)); needs_render = true; }
+                        MapCmd::PanUp => { map.move_by(6.0 / 2.0_f64.powf(map.zoom), 0.0); needs_render = true; }
+                        MapCmd::PanDown => { map.move_by(-6.0 / 2.0_f64.powf(map.zoom), 0.0); needs_render = true; }
+                        MapCmd::ToggleBraille => { map.toggle_braille(); needs_render = true; }
+                        MapCmd::ToggleLabels => { map.toggle_labels(); needs_render = true; }
+                        MapCmd::FitWorld => { map.fit_world(); needs_render = true; }
+                        MapCmd::ToggleGlobeTour => {
+                            if map.camera().is_active() { map.camera_mut().stop(); }
+                            else { map.start_globe_tour(); }
+                            needs_render = true;
+                        }
+                        MapCmd::ToggleMarkerTour => {
+                            if map.camera().is_active() { map.camera_mut().stop(); }
+                            else { map.start_marker_tour(5.0); }
+                            needs_render = true;
+                        }
                     }
                 }
 
                 map.advance_tick();
                 let cam = map.update_camera();
-                if map.needs_animation_redraw() || cam {
-                    needs_render = true;
-                }
+                if map.needs_animation_redraw() || cam { needs_render = true; }
+                if needs_render { do_render(&map, &frame_out).await; }
 
-                if needs_render {
-                    do_render(&map, cur_c, cur_r, &frame_out).await;
-                }
-
-                std::thread::sleep(std::time::Duration::from_millis(200));
+                // 50ms for responsive interaction (matches standalone)
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
         });
     });
 }
 
-async fn do_render(
-    map: &terminalmap::widget::MapState,
-    cols: u16,
-    rows: u16,
-    out: &Arc<Mutex<Option<CachedFrame>>>,
-) {
+async fn do_render(map: &terminalmap::widget::MapState, out: &Arc<Mutex<Option<CachedFrame>>>) {
     if let Ok(ansi) = map.render().await {
         let footer = map.footer();
+        let camera_label = map.camera().current_label().map(|s| s.to_string());
+        let camera_active = map.camera().is_active();
         if let Ok(mut guard) = out.lock() {
-            *guard = Some(CachedFrame { ansi, footer, cols, rows });
-        }
-    }
-}
-
-fn send_cmd(cmd: MapCmd) {
-    if let Ok(guard) = MAP_TX.lock() {
-        if let Some(tx) = guard.as_ref() {
-            let _ = tx.send(cmd);
+            *guard = Some(CachedFrame { ansi, footer, camera_label, camera_active });
         }
     }
 }
@@ -264,37 +274,47 @@ pub fn draw_terminal_map(
 
     let inner = block.inner(area);
     f.render_widget(block, area);
+    if inner.width < 4 || inner.height < 4 { return; }
 
-    if inner.width < 4 || inner.height < 2 {
-        return;
-    }
+    // Reserve 2 rows for footer (help + status), like standalone
+    let footer_rows = 2u16;
+    let map_rows = inner.height.saturating_sub(footer_rows);
 
-    // Clear the inner area so ratatui doesn't leave stale content
-    f.render_widget(Clear, inner);
-
-    let map_rows = inner.height.saturating_sub(1);
-    send_cmd(MapCmd::Resize(inner.width, map_rows));
+    send_map_cmd(MapCmd::Resize(inner.width, map_rows));
 
     if !dots.is_empty() {
-        let markers: Vec<(f64, f64, u8, bool)> = dots
-            .iter()
-            .take(150)
-            .map(|d| {
-                let color = if d.pulsing { 196u8 } else { 48u8 };
-                (d.lat, d.lon, color, d.pulsing)
-            })
-            .collect();
-        send_cmd(MapCmd::UpdateMarkers(markers));
+        let markers: Vec<(f64, f64, u8, bool)> = dots.iter().take(150).map(|d| {
+            let color = if d.pulsing { 196u8 } else { 48u8 };
+            (d.lat, d.lon, color, d.pulsing)
+        }).collect();
+        send_map_cmd(MapCmd::UpdateMarkers(markers));
     }
 
-    // Queue the ANSI write for after ratatui flushes
+    // Fill inner area with spaces so ratatui's diff buffer won't overwrite our ANSI
+    let blank: Vec<Line> = (0..inner.height)
+        .map(|_| Line::from(" ".repeat(inner.width as usize)))
+        .collect();
+    f.render_widget(Paragraph::new(blank).style(Style::default().bg(theme::BG)), inner);
+
+    // Queue ANSI write for after ratatui flush
     let cached = MAP_FRAME.lock().ok().and_then(|guard| {
-        guard.as_ref().map(|cf| (cf.ansi.clone(), cf.footer.clone()))
+        guard.as_ref().map(|cf| (
+            cf.ansi.clone(), cf.footer.clone(),
+            cf.camera_label.clone(), cf.camera_active,
+        ))
     });
 
     match cached {
-        Some((ansi, footer)) => {
-            // Queue for post-ratatui flush
+        Some((ansi, footer, camera_label, camera_active)) => {
+            let help_line = "\x1B[90m hjkl:\x1B[37mPan  \x1B[90ma/z:\x1B[37mZoom  \x1B[90mc:\x1B[37mBraille  \x1B[90mn:\x1B[37mLabels  \x1B[90mw:\x1B[37mWorld  \x1B[90mg:\x1B[37mGlobe  \x1B[90mt:\x1B[37mTour\x1B[0m".to_string();
+            let mut status = footer;
+            if let Some(label) = camera_label {
+                status.push_str(&format!("   >> {}", label));
+            }
+            if camera_active {
+                status.push_str("   [TOUR: g/t to stop]");
+            }
+
             if let Ok(mut pending) = PENDING_WRITES.lock() {
                 pending.push(PendingMapWrite {
                     origin_x: inner.x,
@@ -302,17 +322,15 @@ pub fn draw_terminal_map(
                     map_rows,
                     map_cols: inner.width,
                     ansi,
-                    footer,
+                    help_line,
+                    status_line: status,
                 });
             }
         }
         None => {
             let loading = Paragraph::new(vec![
                 Line::from(""),
-                Line::from(Span::styled(
-                    "  \u{231B} Loading TerminalMap...",
-                    Style::default().fg(theme::TEXT_DIM),
-                )),
+                Line::from(Span::styled("  \u{231B} Loading TerminalMap...", Style::default().fg(theme::TEXT_DIM))),
             ]).style(Style::default().bg(theme::BG));
             f.render_widget(loading, inner);
         }
