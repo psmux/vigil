@@ -64,6 +64,8 @@ pub enum MapCmd {
     ToggleBraille,
     ToggleLabels,
     FitWorld,
+    /// 'g' key: if markers exist, tours markers; otherwise globe tour
+    ToggleSmartTour,
     ToggleGlobeTour,
     ToggleMarkerTour,
 }
@@ -200,8 +202,10 @@ fn ensure_started() {
                                 } else {
                                     terminalmap::marker::MarkerAnimation::None
                                 };
+                                // Ring(3) with pulse — visible pulsing circles like a radar
                                 map.add_marker(
                                     terminalmap::marker::MapMarker::dot(*lat, *lon, *color)
+                                        .with_shape(terminalmap::marker::MarkerShape::Ring(3))
                                         .with_animation(anim),
                                 );
                             }
@@ -216,14 +220,31 @@ fn ensure_started() {
                         MapCmd::ToggleBraille => { map.toggle_braille(); needs_render = true; }
                         MapCmd::ToggleLabels => { map.toggle_labels(); needs_render = true; }
                         MapCmd::FitWorld => { map.fit_world(); needs_render = true; }
+                        MapCmd::ToggleSmartTour => {
+                            if map.camera().is_active() {
+                                map.camera_mut().stop();
+                            } else if !map.markers().is_empty() {
+                                // Tour markers — pan to where connections are
+                                map.start_marker_tour(2.0);
+                            } else {
+                                // No markers — globe tour at continent level
+                                map.start_globe_tour_at(1.0);
+                            }
+                            needs_render = true;
+                        }
                         MapCmd::ToggleGlobeTour => {
                             if map.camera().is_active() { map.camera_mut().stop(); }
-                            else { map.start_globe_tour(); }
+                            else {
+                                map.start_globe_tour_at(1.0);
+                            }
                             needs_render = true;
                         }
                         MapCmd::ToggleMarkerTour => {
                             if map.camera().is_active() { map.camera_mut().stop(); }
-                            else { map.start_marker_tour(5.0); }
+                            else {
+                                // Zoom 2.0 = regional level, centers on where markers are
+                                map.start_marker_tour(2.0);
+                            }
                             needs_render = true;
                         }
                     }

@@ -65,7 +65,7 @@ fn handle_map_key(key: KeyEvent) -> bool {
         KeyCode::Char('c') => MapCmd::ToggleBraille,
         KeyCode::Char('n') => MapCmd::ToggleLabels,
         KeyCode::Char('w') => MapCmd::FitWorld,
-        KeyCode::Char('g') => MapCmd::ToggleGlobeTour,
+        KeyCode::Char('g') => MapCmd::ToggleSmartTour,
         KeyCode::Char('t') => MapCmd::ToggleMarkerTour,
         _ => return false,
     };
