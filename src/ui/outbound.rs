@@ -14,8 +14,7 @@ use crate::data::outbound::AppOutboundStats;
 use crate::format::format_bps;
 use crate::theme;
 use crate::widgets::bar_chart::{draw_bar_chart, BarItem};
-use crate::widgets::braille_map::{country_center, MapDot};
-use crate::widgets::terminal_map::draw_terminal_map;
+use crate::widgets::terminal_map::{country_center, draw_terminal_map, MapDot};
 
 // ─── Color constants ────────────────────────────────────────────────
 const OUTBOUND_COLOR: Color = Color::Rgb(0, 200, 160);

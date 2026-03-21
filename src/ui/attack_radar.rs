@@ -12,8 +12,7 @@ use crate::data::alerts::AlertSeverity;
 use crate::format::{format_count, format_time_ago};
 use crate::theme;
 use crate::widgets::bar_chart::{self, BarItem};
-use crate::widgets::braille_map::MapDot;
-use crate::widgets::terminal_map;
+use crate::widgets::terminal_map::{self, MapDot};
 use crate::widgets::heatmap;
 
 /// Draw the Attack Radar (View 2).
