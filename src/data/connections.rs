@@ -145,74 +145,98 @@ fn u128_to_ip(addr: u128, is_ipv6: bool) -> IpAddr {
 /// Classify direction based on address characteristics and state.
 fn classify_direction(local: SocketAddr, remote: SocketAddr, state: TcpState) -> Direction {
     let remote_ip = remote.ip();
-    let local_ip = local.ip();
 
-    // Loopback or both private → Local
-    if remote_ip.is_loopback() || (is_local_ip(local_ip) && is_local_ip(remote_ip)) {
+    // Only true loopback is Local — NOT private-to-private, which may be
+    // LAN, VPN, Docker, or CGNAT traffic that the user wants to see.
+    if remote_ip.is_loopback() || remote_ip.is_unspecified() {
+        return Direction::Local;
+    }
+
+    // Also local if remote is the exact same IP as local (process talking to itself)
+    if remote_ip == local.ip() && !remote_ip.is_unspecified() {
         return Direction::Local;
     }
 
     match state {
         TcpState::Listen => Direction::Inbound,
-        TcpState::Established => {
-            let lp = local.port();
-            let rp = remote.port();
-
-            // Well-known port heuristics
-            if lp < 1024 {
-                return Direction::Inbound;
-            }
-            if rp < 1024 {
-                return Direction::Outbound;
-            }
-
-            // Common service ports on remote side → Outbound
-            if is_common_remote_port(rp) {
-                return Direction::Outbound;
-            }
-            // Common service ports on local side → Inbound
-            if is_common_remote_port(lp) {
-                return Direction::Inbound;
-            }
-
-            // Ephemeral port heuristic: local port in ephemeral range
-            // with remote on a public IP → likely outbound
-            if lp >= 32768 && !geoip::is_private_ip(remote_ip) {
-                return Direction::Outbound;
-            }
-
-            Direction::Unknown
-        }
         TcpState::SynSent => Direction::Outbound,
         TcpState::SynRecv => Direction::Inbound,
-        TcpState::CloseWait | TcpState::FinWait1 | TcpState::FinWait2 => {
-            // Inherit direction from port heuristics
-            if local.port() < 1024 { Direction::Inbound }
-            else if remote.port() < 1024 { Direction::Outbound }
-            else if local.port() >= 32768 && !geoip::is_private_ip(remote_ip) {
-                Direction::Outbound
-            } else { Direction::Unknown }
+        TcpState::Established | TcpState::CloseWait | TcpState::FinWait1
+        | TcpState::FinWait2 | TcpState::LastAck | TcpState::Closing => {
+            classify_by_ports(local, remote)
         }
-        _ => Direction::Unknown,
+        TcpState::TimeWait | TcpState::Close => {
+            // For UDP, state 07 (Close) is the normal active state — still classify.
+            // For TCP TIME_WAIT / CLOSE, port heuristics are the best we have.
+            classify_by_ports(local, remote)
+        }
+        TcpState::Unknown => classify_by_ports(local, remote),
     }
 }
 
-/// Common service ports that indicate the remote is a server (connection is outbound).
-fn is_common_remote_port(port: u16) -> bool {
-    matches!(
-        port,
-        80 | 443 | 8080 | 8443 | 3306 | 5432 | 6379 | 27017 |  // HTTP, HTTPS, DBs
-        5222 | 5223 | 5228 | 5229 | 5230 |                       // XMPP, GCM
-        9090 | 9093 | 9200 | 9300 |                               // Prometheus, Elasticsearch
-        1883 | 8883 |                                               // MQTT
-        6667 | 6697 |                                               // IRC
-        3478 | 5349 |                                               // STUN/TURN
-        1935 | 554                                                  // RTMP, RTSP
-    )
+/// Determine direction from port numbers alone.
+fn classify_by_ports(local: SocketAddr, remote: SocketAddr) -> Direction {
+    let lp = local.port();
+    let rp = remote.port();
+
+    // Well-known port (< 1024) on one side is definitive
+    if lp < 1024 && rp >= 1024 {
+        return Direction::Inbound;
+    }
+    if rp < 1024 && lp >= 1024 {
+        return Direction::Outbound;
+    }
+
+    // Common service ports on remote → Outbound
+    if is_common_service_port(rp) && !is_common_service_port(lp) {
+        return Direction::Outbound;
+    }
+    if is_common_service_port(lp) && !is_common_service_port(rp) {
+        return Direction::Inbound;
+    }
+
+    // Ephemeral local port (>= 32768) connecting to any remote → Outbound.
+    // This works for both public and private IPs (LAN, VPN, containers).
+    if lp >= 32768 && rp < 32768 {
+        return Direction::Outbound;
+    }
+    if rp >= 32768 && lp < 32768 {
+        return Direction::Inbound;
+    }
+
+    // Both in ephemeral range — the lower port is more likely the "server"
+    if lp >= 32768 && rp >= 32768 {
+        return if rp < lp { Direction::Outbound } else { Direction::Inbound };
+    }
+
+    Direction::Unknown
 }
 
-fn is_local_ip(ip: IpAddr) -> bool {
-    ip.is_loopback() || geoip::is_private_ip(ip)
+/// Common service ports that indicate the remote side is a server.
+fn is_common_service_port(port: u16) -> bool {
+    matches!(
+        port,
+        // Web
+        80 | 443 | 8080 | 8443 | 8000 | 8888 | 3000 | 4000 | 5000 | 9000 |
+        // Databases
+        3306 | 5432 | 6379 | 27017 | 11211 | 9042 | 26257 | 5984 | 8529 |
+        // Messaging / XMPP / GCM
+        5222 | 5223 | 5228 | 5229 | 5230 | 5672 | 15672 | 9092 | 4222 |
+        // Monitoring
+        9090 | 9093 | 9100 | 9200 | 9300 | 3100 | 8086 | 8125 | 9411 |
+        // MQTT
+        1883 | 8883 |
+        // IRC
+        6667 | 6697 |
+        // STUN/TURN
+        3478 | 5349 |
+        // Streaming
+        1935 | 554 |
+        // Container / orchestration
+        2375 | 2376 | 6443 | 10250 | 2379 | 2380 |
+        // Other
+        8081 | 8082 | 8880
+    )
 }
 
 /// Map a UID to a username by reading /etc/passwd.

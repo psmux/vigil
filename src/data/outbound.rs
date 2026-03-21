@@ -6,7 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 
 use chrono::{DateTime, Utc};
 
-use crate::data::{Connection, Direction, GeoLocation, TcpState};
+use crate::data::{Connection, Direction, GeoLocation, Protocol, TcpState};
 
 // ─── Per-app outbound summary ───────────────────────────────────────
 
@@ -86,18 +86,22 @@ impl OutboundTracker {
         let mut app_conns: HashMap<String, Vec<&Connection>> = HashMap::new();
 
         for conn in connections {
-            // Skip dead/closing states — only show LIVE outbound connections
-            // TIME_WAIT, CLOSE, CLOSE_WAIT are kernel-owned with no real process
-            match conn.state {
-                TcpState::TimeWait | TcpState::Close | TcpState::CloseWait
-                | TcpState::LastAck | TcpState::Closing => continue,
-                _ => {}
+            // For TCP: skip fully dead states with no owning process
+            // For UDP: state 07 (Close) is the normal active state — don't skip
+            if conn.protocol == Protocol::Tcp {
+                match conn.state {
+                    TcpState::TimeWait | TcpState::Close | TcpState::LastAck
+                    | TcpState::Closing => continue,
+                    _ => {}
+                }
             }
 
-            // Include Outbound and Unknown-direction established connections
+            // Include any connection classified as Outbound.
+            // Also include Unknown-direction established/active connections
+            // (better to show too much than miss real outbound traffic).
             let is_outbound = conn.direction == Direction::Outbound
                 || (conn.direction == Direction::Unknown
-                    && conn.state == TcpState::Established);
+                    && !matches!(conn.state, TcpState::Listen));
 
             if !is_outbound {
                 continue;
