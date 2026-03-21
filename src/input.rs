@@ -35,13 +35,42 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
             app.scroll_offset = 0;
         }
 
-        // Scrolling
+        // Scrolling / selection — Wire view uses its own selection cursor
         KeyCode::Char('j') | KeyCode::Down => {
-            app.scroll_offset = app.scroll_offset.saturating_add(1);
+            if app.view == View::Wire {
+                let total = app.wire_tracker.events().len();
+                if total > 0 {
+                    app.wire_selected = (app.wire_selected + 1).min(total - 1);
+                    // If user scrolls down past end, re-enable auto-scroll
+                    if app.wire_selected == 0 {
+                        app.wire_auto_scroll = true;
+                    } else {
+                        app.wire_auto_scroll = false;
+                    }
+                }
+            } else {
+                app.scroll_offset = app.scroll_offset.saturating_add(1);
+            }
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            app.scroll_offset = app.scroll_offset.saturating_sub(1);
+            if app.view == View::Wire {
+                if app.wire_selected > 0 {
+                    app.wire_selected -= 1;
+                }
+                app.wire_auto_scroll = false;
+            } else {
+                app.scroll_offset = app.scroll_offset.saturating_sub(1);
+            }
         }
+
+        // Wire: G = jump to latest / resume auto-scroll
+        KeyCode::Char('G') | KeyCode::Char('g') if app.view == View::Wire => {
+            app.wire_selected = 0;
+            app.wire_auto_scroll = true;
+        }
+
+        // Wire: Enter = select (no-op, selection already works via j/k)
+        KeyCode::Enter if app.view == View::Wire => {}
 
         // Refresh (no-op — refresh is automatic)
         KeyCode::Char('r') => {}
