@@ -148,8 +148,18 @@ fn build_packet_row<'a>(ev: &WireEvent, _app: &App, width: usize, selected: bool
     };
     let src_d = truncpad(&src, 21);
     let dst_d = truncpad(&dst, 21);
-    // Protocol
-    let proto = format!("{:<8}", ev.service.label());
+    // Protocol — show transport protocol when app-level service is unknown
+    let (proto_label, proto_color) = if ev.service != AppProtocol::Other {
+        (ev.service.label(), ev.service.color())
+    } else {
+        match ev.protocol {
+            Protocol::Tcp => ("TCP", Color::Rgb(100, 180, 255)),
+            Protocol::Udp => ("UDP", Color::Rgb(130, 200, 130)),
+            Protocol::Icmp => ("ICMP", Color::Rgb(255, 180, 80)),
+            Protocol::Raw => ("RAW", Color::Rgb(200, 100, 200)),
+        }
+    };
+    let proto = format!("{:<8}", proto_label);
     // Length (tx_queue + rx_queue as byte estimate)
     let len = ev.tx_queue + ev.rx_queue;
     let len_str = format!("{:<5}", if len > 0 { format!("{}", len) } else { "-".into() });
@@ -163,7 +173,7 @@ fn build_packet_row<'a>(ev: &WireEvent, _app: &App, width: usize, selected: bool
         Span::raw(" "),
         Span::styled(dst_d, s(Color::Rgb(190, 200, 220))),
         Span::raw(" "),
-        Span::styled(proto, s(ev.service.color())),
+        Span::styled(proto, s(proto_color)),
         Span::styled(len_str, s(Color::Rgb(100, 110, 130))),
         Span::styled(truncpad(&info, width.saturating_sub(78)), s(Color::Rgb(200, 210, 230))),
     ])
@@ -281,11 +291,21 @@ fn draw_detail_pane(f: &mut Frame, app: &App, area: Rect) {
             };
             let proto = ev.protocol.label();
             let proc = ev.process_name.as_deref().unwrap_or("?");
+            let (svc_label, svc_color) = if ev.service != AppProtocol::Other {
+                (ev.service.label(), ev.service.color())
+            } else {
+                match ev.protocol {
+                    Protocol::Tcp => ("TCP", Color::Rgb(100, 180, 255)),
+                    Protocol::Udp => ("UDP", Color::Rgb(130, 200, 130)),
+                    Protocol::Icmp => ("ICMP", Color::Rgb(255, 180, 80)),
+                    Protocol::Raw => ("RAW", Color::Rgb(200, 100, 200)),
+                }
+            };
             lines.push(Line::from(vec![
                 Span::styled("  ", dim),
                 Span::styled(format!("[{}] ", kind), lbl),
                 Span::styled(format!("{} {} \u{2192} {} ", proto, ev.local_addr, ev.remote_addr), val),
-                Span::styled(format!("({}) ", ev.service.label()), Style::default().fg(ev.service.color())),
+                Span::styled(format!("({}) ", svc_label), Style::default().fg(svc_color)),
                 Span::styled(format!("<{}>", proc), Style::default().fg(theme::GREEN)),
             ]));
         }
@@ -331,10 +351,20 @@ fn draw_detail_pane(f: &mut Frame, app: &App, area: Rect) {
             ]));
 
             // Layer 3: Service / Application
+            let (svc_label, svc_color) = if ev.service != AppProtocol::Other {
+                (ev.service.label(), ev.service.color())
+            } else {
+                match ev.protocol {
+                    Protocol::Tcp => ("TCP", Color::Rgb(100, 180, 255)),
+                    Protocol::Udp => ("UDP", Color::Rgb(130, 200, 130)),
+                    Protocol::Icmp => ("ICMP", Color::Rgb(255, 180, 80)),
+                    Protocol::Raw => ("RAW", Color::Rgb(200, 100, 200)),
+                }
+            };
             lines.push(Line::from(vec![
                 Span::styled("  \u{251c}\u{2500} ", tree),
                 Span::styled("Service: ", lbl),
-                Span::styled(format!("{}  ", ev.service.label()), Style::default().fg(ev.service.color())),
+                Span::styled(format!("{}  ", svc_label), Style::default().fg(svc_color)),
                 Span::styled(format!("port={}", ev.remote_addr.port()), dim),
             ]));
 

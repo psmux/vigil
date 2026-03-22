@@ -23,6 +23,12 @@ pub enum AppProtocol {
     QUIC,
     SMB,
     RDP,
+    LDAP,
+    Kerberos,
+    SNMP,
+    MDNS,
+    SSDP,
+    MQTT,
     Other,
 }
 
@@ -53,6 +59,12 @@ impl AppProtocol {
             67 | 68 => Self::DHCP,
             445 | 139 => Self::SMB,
             3389 => Self::RDP,
+            88 => Self::Kerberos,
+            161 | 162 => Self::SNMP,
+            389 | 636 => Self::LDAP,
+            1883 | 8883 => Self::MQTT,
+            1900 => Self::SSDP,
+            5353 => Self::MDNS,
             _ => Self::Other,
         }
     }
@@ -77,6 +89,12 @@ impl AppProtocol {
             Self::QUIC => "QUIC",
             Self::SMB => "SMB",
             Self::RDP => "RDP",
+            Self::LDAP => "LDAP",
+            Self::Kerberos => "Kerberos",
+            Self::SNMP => "SNMP",
+            Self::MDNS => "mDNS",
+            Self::SSDP => "SSDP",
+            Self::MQTT => "MQTT",
             Self::Other => "Other",
         }
     }
@@ -101,12 +119,18 @@ impl AppProtocol {
             Self::QUIC => Color::Rgb(128, 0, 255),
             Self::SMB => Color::Rgb(200, 200, 0),
             Self::RDP => Color::LightRed,
+            Self::LDAP => Color::Rgb(200, 160, 60),
+            Self::Kerberos => Color::Rgb(255, 120, 120),
+            Self::SNMP => Color::Rgb(100, 200, 100),
+            Self::MDNS => Color::Rgb(80, 160, 200),
+            Self::SSDP => Color::Rgb(200, 120, 200),
+            Self::MQTT => Color::Rgb(200, 80, 160),
             Self::Other => Color::White,
         }
     }
 
     /// All variants for iteration.
-    pub const ALL: [AppProtocol; 18] = [
+    pub const ALL: [AppProtocol; 24] = [
         Self::HTTP,
         Self::HTTPS,
         Self::SSH,
@@ -124,6 +148,12 @@ impl AppProtocol {
         Self::QUIC,
         Self::SMB,
         Self::RDP,
+        Self::LDAP,
+        Self::Kerberos,
+        Self::SNMP,
+        Self::MDNS,
+        Self::SSDP,
+        Self::MQTT,
         Self::Other,
     ];
 }

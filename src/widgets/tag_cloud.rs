@@ -57,6 +57,153 @@ pub fn draw_tag_cloud(
     f.render_widget(paragraph, inner);
 }
 
+// ─── Pulse-style tag cloud (psnet-inspired) ─────────────────────
+
+/// Draw a pulse-style signal cloud — compact tags with activity markers.
+///
+/// Unlike the decorator-heavy `draw_tag_cloud`, this renders signals as
+/// minimal labels with pulsing `●` markers for hot signals.  Event-category
+/// signals (NEW, CLOSED, CONNECT) are filtered out — only protocols, hosts,
+/// countries, and processes are shown.
+pub fn draw_pulse_cloud(
+    f: &mut Frame,
+    area: Rect,
+    tags: &[SignalTag],
+    title: &str,
+    animation_frame: u8,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
+        .title(Span::styled(
+            format!(" {} ", title),
+            Style::default()
+                .fg(theme::TITLE)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(theme::BG));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.width < 10 || inner.height < 1 {
+        return;
+    }
+
+    // Filter out Event category (NEW, CLOSED, CONNECT, ATTACK, state labels)
+    let filtered: Vec<&SignalTag> = tags
+        .iter()
+        .filter(|t| t.category != SignalCategory::Event)
+        .collect();
+
+    if filtered.is_empty() {
+        let msg = Paragraph::new(Line::from(Span::styled(
+            "  Waiting for network signals\u{2026}",
+            Style::default().fg(theme::TEXT_DIM),
+        )))
+        .style(Style::default().bg(theme::BG));
+        f.render_widget(msg, inner);
+        return;
+    }
+
+    let lines = layout_pulse_tags(&filtered, inner.width, inner.height, animation_frame);
+    let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::BG));
+    f.render_widget(paragraph, inner);
+}
+
+/// Flow pulse tags left-to-right, wrapping to next line.
+fn layout_pulse_tags(
+    tags: &[&SignalTag],
+    width: u16,
+    max_lines: u16,
+    animation_frame: u8,
+) -> Vec<Line<'static>> {
+    let w = width as usize;
+    let pulse_on = animation_frame % 4 < 2;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut row_spans: Vec<Span<'static>> = Vec::new();
+    let mut row_width: usize = 0;
+
+    for tag in tags {
+        let rendered = render_pulse_tag(tag, pulse_on);
+        let tag_width = rendered.width;
+        let gap = if row_width == 0 { 1 } else { 2 };
+
+        if row_width > 0 && row_width + gap + tag_width > w {
+            lines.push(Line::from(row_spans));
+            row_spans = Vec::new();
+            row_width = 0;
+            if lines.len() >= max_lines as usize {
+                break;
+            }
+        }
+
+        if row_width == 0 {
+            row_spans.push(Span::raw(" "));
+            row_width = 1;
+        } else {
+            row_spans.push(Span::styled(
+                " ",
+                Style::default().fg(theme::TEXT_MUTED),
+            ));
+            row_width += 1;
+        }
+
+        row_spans.extend(rendered.spans);
+        row_width += tag_width;
+    }
+
+    if !row_spans.is_empty() && lines.len() < max_lines as usize {
+        lines.push(Line::from(row_spans));
+    }
+
+    lines
+}
+
+/// Render a single tag in pulse style: `● LABEL` for hot, `LABEL` for cool.
+fn render_pulse_tag(tag: &SignalTag, pulse_on: bool) -> RenderedTag {
+    let is_hot = tag.heat > 0.5;
+
+    // Brightness oscillates for hot tags to create pulse effect
+    let brightness = if is_hot {
+        if pulse_on { 1.3 } else { 0.85 }
+    } else {
+        tag.weight.max(0.25)
+    };
+    let color = scale_color(tag.color, brightness);
+
+    // Hot signals get activity marker
+    let (marker, marker_style) = if is_hot && pulse_on {
+        ("\u{25cf}", Style::default().fg(color)) // ● filled
+    } else if is_hot {
+        ("\u{25c7}", Style::default().fg(dim_color(color, 0.5))) // ◇ hollow dim
+    } else {
+        ("", Style::default())
+    };
+
+    let label_style = if tag.weight > 0.5 {
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    } else if tag.weight > 0.15 {
+        Style::default().fg(color)
+    } else {
+        Style::default().fg(dim_color(color, 0.45))
+    };
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut w = 0;
+
+    if !marker.is_empty() {
+        spans.push(Span::styled(marker.to_string(), marker_style));
+        w += 1;
+    }
+
+    spans.push(Span::styled(tag.label.clone(), label_style));
+    w += display_width(&tag.label);
+
+    RenderedTag { spans, width: w }
+}
+
 // ─── Tag layout engine ──────────────────────────────────────────
 
 /// Flow tags left-to-right, wrapping to next line when the row fills.

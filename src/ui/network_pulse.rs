@@ -22,19 +22,21 @@ const ORANGE: Color = Color::Rgb(255, 160, 60);
 /// Layout:
 /// ```text
 /// Vertical [
-///   top_section (30%): Vertical [
+///   top_section (25%): Vertical [
 ///     bandwidth_sparklines (50%)
 ///     state_bar_chart (50%)
 ///   ]
-///   connection_table (70%)
+///   pulse_cloud (Length 8): signal tag cloud (protocols, hosts, countries, processes)
+///   connection_table (remaining)
 /// ]
 /// ```
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let main_rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(30),
-            Constraint::Percentage(70),
+            Constraint::Percentage(25),
+            Constraint::Length(8),
+            Constraint::Min(10),
         ])
         .split(area);
 
@@ -50,8 +52,11 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     draw_bandwidth_sparklines(f, app, top_rows[0]);
     draw_state_bar_chart(f, app, top_rows[1]);
 
+    // ── Middle section: protocol signal cloud (psnet-style) ─────
+    draw_protocol_cloud(f, app, main_rows[1]);
+
     // ── Bottom section: connection table ──────────────────────────
-    draw_connection_table(f, app, main_rows[1]);
+    draw_connection_table(f, app, main_rows[2]);
 }
 
 // ─── Bandwidth Sparklines ─────────────────────────────────────────
@@ -344,4 +349,132 @@ fn country_code_color(cc: &str) -> Color {
         "SG" => Color::Rgb(200, 130, 255),
         _ => Color::Rgb(140, 160, 190),
     }
+}
+
+// ─── Protocol Cloud (ported from psnet/src/ui/widgets/protocol_cloud.rs) ─
+
+/// Compact count formatting — identical to psnet's compact_count().
+fn compact_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        let m = n as f64 / 1_000_000.0;
+        if m >= 100.0 { format!("{}M", m as u64) }
+        else if m >= 10.0 { format!("{:.0}M", m) }
+        else { format!("{:.1}M", m) }
+    } else if n >= 1_000 {
+        let k = n as f64 / 1_000.0;
+        if k >= 100.0 { format!("{}k", k as u64) }
+        else if k >= 10.0 { format!("{:.0}k", k) }
+        else { format!("{:.1}k", k) }
+    } else {
+        format!("{}", n)
+    }
+}
+
+/// Interpolate a color toward dim — identical to psnet's fade_color().
+fn fade_color(base: Color, brightness: f64) -> Color {
+    match base {
+        Color::Rgb(r, g, b) => {
+            let (dr, dg, db) = (40u8, 45u8, 55u8);
+            let br = brightness.clamp(0.0, 1.0);
+            Color::Rgb(
+                (dr as f64 + (r as f64 - dr as f64) * br) as u8,
+                (dg as f64 + (g as f64 - dg as f64) * br) as u8,
+                (db as f64 + (b as f64 - db as f64) * br) as u8,
+            )
+        }
+        other => if brightness > 0.3 { other } else { Color::DarkGray },
+    }
+}
+
+/// Draw the protocol tag cloud — ported from psnet's draw_protocol_cloud().
+///
+/// Uses `app.proto_tracker` (psnet's ProtocolTracker) directly.
+fn draw_protocol_cloud(f: &mut Frame, app: &App, area: Rect) {
+    let bg = Color::Rgb(8, 12, 24);
+    let border_color = Color::Rgb(30, 50, 85);
+    let title_color = Color::Rgb(100, 160, 255);
+
+    let block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(" Network Signals ", Style::default().fg(title_color)),
+        ]))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(bg));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.width < 4 || inner.height < 1 {
+        return;
+    }
+
+    let tick = app.tick_count;
+    let protos = app.proto_tracker.active_protocols(tick);
+
+    if protos.is_empty() {
+        let empty = Paragraph::new(Line::from(vec![
+            Span::styled(
+                "  Waiting for packets...",
+                Style::default().fg(Color::Rgb(60, 70, 90)),
+            ),
+        ]))
+        .style(Style::default().bg(bg));
+        f.render_widget(empty, inner);
+        return;
+    }
+
+    let max_width = inner.width as usize;
+    let max_lines = inner.height as usize;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut current_spans: Vec<Span<'static>> = Vec::new();
+    let mut current_width: usize = 0;
+
+    for (label, activity, color) in &protos {
+        let brightness = app.proto_tracker.brightness(label, tick);
+        let is_active = brightness > 0.0;
+
+        let count_str = compact_count(activity.count);
+        let tag_text = format!("{}:{}", label, count_str);
+        let tag_width = tag_text.len() + 1; // +1 trailing space
+
+        // Wrap to next line if needed
+        if current_width + tag_width > max_width && !current_spans.is_empty() {
+            lines.push(Line::from(current_spans));
+            current_spans = Vec::new();
+            current_width = 0;
+            if lines.len() >= max_lines {
+                break;
+            }
+        }
+
+        let fg = fade_color(*color, brightness);
+        let mut style = Style::default().fg(fg).bg(bg);
+        if is_active {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+
+        // Recent activity marker: ● prefix for very active protocols
+        if is_active && activity.recent_count > 0 {
+            let dot_brightness = brightness.clamp(0.5, 1.0);
+            let dot_color = fade_color(*color, dot_brightness);
+            current_spans.push(Span::styled(
+                "\u{25cf}".to_string(),
+                Style::default().fg(dot_color).bg(bg),
+            ));
+            current_width += 1;
+        }
+
+        current_spans.push(Span::styled(tag_text, style));
+        current_spans.push(Span::styled(" ".to_string(), Style::default().bg(bg)));
+        current_width += tag_width;
+    }
+
+    if !current_spans.is_empty() && lines.len() < max_lines {
+        lines.push(Line::from(current_spans));
+    }
+
+    let paragraph = Paragraph::new(lines).style(Style::default().bg(bg));
+    f.render_widget(paragraph, inner);
 }

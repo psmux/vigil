@@ -100,13 +100,23 @@ impl SignalTracker {
                 continue;
             }
 
-            // Protocol
+            // Protocol — check both ports (remote first, like psnet)
             let is_tcp = conn.protocol == Protocol::Tcp;
-            let lo = conn.local_addr.port();
-            let hi = conn.remote_addr.port();
-            let proto = AppProtocol::from_port(lo.min(hi), is_tcp);
-            if proto != AppProtocol::Other {
-                self.bump(proto.label(), SignalCategory::Protocol, 0.04, proto.color());
+            let proto_r = AppProtocol::from_port(conn.remote_addr.port(), is_tcp);
+            let proto_l = AppProtocol::from_port(conn.local_addr.port(), is_tcp);
+            let app_proto = if proto_r != AppProtocol::Other { proto_r } else { proto_l };
+
+            if app_proto != AppProtocol::Other {
+                self.bump(app_proto.label(), SignalCategory::Protocol, 0.04, app_proto.color());
+            } else {
+                // Bump transport protocol so TCP/UDP/ICMP/RAW are visible
+                let (label, color) = match conn.protocol {
+                    Protocol::Tcp => ("TCP", Color::Rgb(100, 180, 255)),
+                    Protocol::Udp => ("UDP", Color::Rgb(130, 200, 130)),
+                    Protocol::Icmp => ("ICMP", Color::Rgb(255, 180, 80)),
+                    Protocol::Raw => ("RAW", Color::Rgb(200, 100, 200)),
+                };
+                self.bump(label, SignalCategory::Protocol, 0.04, color);
             }
 
             // Process
@@ -156,6 +166,15 @@ impl SignalTracker {
                     0.12,
                     event.service.color(),
                 );
+            } else {
+                // Bump transport protocol for full stack visibility
+                let (label, color) = match event.protocol {
+                    Protocol::Tcp => ("TCP", Color::Rgb(100, 180, 255)),
+                    Protocol::Udp => ("UDP", Color::Rgb(130, 200, 130)),
+                    Protocol::Icmp => ("ICMP", Color::Rgb(255, 180, 80)),
+                    Protocol::Raw => ("RAW", Color::Rgb(200, 100, 200)),
+                };
+                self.bump(label, SignalCategory::Protocol, 0.12, color);
             }
 
             // Bump host from wire event

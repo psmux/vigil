@@ -16,6 +16,7 @@ pub mod discovery;
 pub mod outbound;
 pub mod signals;
 pub mod wire;
+pub mod protocol_tracker;
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};

@@ -168,6 +168,131 @@ fn parse_addr_port(s: &str, ipv6: bool) -> Option<(u128, u16)> {
     Some((addr, port))
 }
 
+// ─── Low-level protocol scanning ────────────────────────────────────
+
+/// Count data lines in a /proc file (skip one header line).
+fn count_data_lines(path: &str) -> usize {
+    match fs::read_to_string(path) {
+        Ok(c) => c.lines().skip(1).filter(|l| !l.trim().is_empty()).count(),
+        Err(_) => 0,
+    }
+}
+
+/// Count IGMP multicast group memberships from /proc/net/igmp.
+/// Group entries are indented lines beneath each interface block.
+fn count_igmp_groups() -> usize {
+    match fs::read_to_string("/proc/net/igmp") {
+        Ok(c) => c
+            .lines()
+            .filter(|l| l.starts_with('\t') || l.starts_with(' '))
+            .count(),
+        Err(_) => 0,
+    }
+}
+
+/// Count wireless interfaces from /proc/net/wireless.
+fn count_wireless_ifaces() -> usize {
+    match fs::read_to_string("/proc/net/wireless") {
+        Ok(c) => c.lines().skip(2).filter(|l| !l.trim().is_empty()).count(),
+        Err(_) => 0,
+    }
+}
+
+/// Check if any DHCP lease files exist, indicating active DHCP usage.
+fn has_dhcp_leases() -> bool {
+    let lease_dirs = [
+        "/var/lib/dhcp",
+        "/var/lib/dhclient",
+        "/var/lib/NetworkManager",
+        "/var/lib/dhcpcd",
+        "/run/dhclient",
+    ];
+    for dir in &lease_dirs {
+        let path = Path::new(dir);
+        if !path.exists() {
+            continue;
+        }
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let n = entry.file_name();
+                let name = n.to_string_lossy();
+                if name.contains("lease") || name.contains("dhclient") || name.contains("dhcpcd") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Scan ALL low-level protocol sources from /proc and /sys.
+///
+/// Returns `(label, count)` pairs for every protocol with activity.
+/// This covers the full network stack that Linux exposes:
+///   Layer 2: ARP, Packet (AF_PACKET), WiFi
+///   Layer 3: IGMP (multicast), IPv6 (NDP/addresses)
+///   Layer 4: SCTP, DCCP (if modules loaded)
+///   IPC:     Unix sockets, Netlink
+///   Other:   DHCP (lease detection)
+pub fn scan_low_level_protocols() -> Vec<(&'static str, usize)> {
+    let mut protos = Vec::new();
+
+    // Layer 2
+    let arp = count_data_lines("/proc/net/arp");
+    if arp > 0 {
+        protos.push(("ARP", arp));
+    }
+    let packet = count_data_lines("/proc/net/packet");
+    if packet > 0 {
+        protos.push(("Packet", packet));
+    }
+    let wifi = count_wireless_ifaces();
+    if wifi > 0 {
+        protos.push(("WiFi", wifi));
+    }
+
+    // Layer 3
+    let igmp = count_igmp_groups();
+    if igmp > 0 {
+        protos.push(("IGMP", igmp));
+    }
+    let igmp6 = count_data_lines("/proc/net/igmp6");
+    if igmp6 > 0 {
+        protos.push(("MLD", igmp6)); // IPv6 multicast
+    }
+    let ipv6 = count_data_lines("/proc/net/if_inet6");
+    if ipv6 > 0 {
+        protos.push(("IPv6", ipv6));
+    }
+
+    // Layer 4 (optional kernel modules)
+    let sctp = count_data_lines("/proc/net/sctp/assocs");
+    if sctp > 0 {
+        protos.push(("SCTP", sctp));
+    }
+    let dccp = count_data_lines("/proc/net/dccp");
+    if dccp > 0 {
+        protos.push(("DCCP", dccp));
+    }
+
+    // IPC
+    let unix = count_data_lines("/proc/net/unix");
+    if unix > 0 {
+        protos.push(("Unix", unix));
+    }
+    let netlink = count_data_lines("/proc/net/netlink");
+    if netlink > 0 {
+        protos.push(("Netlink", netlink));
+    }
+
+    // DHCP
+    if has_dhcp_leases() {
+        protos.push(("DHCP", 1));
+    }
+
+    protos
+}
+
 // ─── /proc/net/dev ──────────────────────────────────────────────────
 
 /// Parse `/proc/net/dev` and return `(iface_name, rx_bytes, tx_bytes)` tuples.

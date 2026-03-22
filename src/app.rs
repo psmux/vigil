@@ -14,6 +14,7 @@ use crate::data::discovery::LanDevice;
 use crate::data::outbound::{AppOutboundStats, OutboundTracker};
 use crate::data::signals::{SignalTag, SignalTracker};
 use crate::data::wire::WireTracker;
+use crate::data::protocol_tracker::ProtocolTracker;
 use crate::score;
 
 // ─── View enum ────────────────────────────────────────────────────
@@ -29,11 +30,10 @@ pub enum View {
     SystemVitals,
     Outbound,
     Wire,
-    Signals,
 }
 
 impl View {
-    pub const ALL: [View; 11] = [
+    pub const ALL: [View; 10] = [
         View::CommandCenter,
         View::AttackRadar,
         View::Alerts,
@@ -44,7 +44,6 @@ impl View {
         View::SystemVitals,
         View::Outbound,
         View::Wire,
-        View::Signals,
     ];
 
     pub fn next(self) -> Self {
@@ -69,7 +68,6 @@ impl View {
             Self::SystemVitals => "System Vitals",
             Self::Outbound => "Outbound",
             Self::Wire => "Wire",
-            Self::Signals => "Signals",
         }
     }
 
@@ -85,7 +83,6 @@ impl View {
             Self::SystemVitals => 7,
             Self::Outbound => 8,
             Self::Wire => 9,
-            Self::Signals => 10,
         }
     }
 
@@ -193,6 +190,9 @@ pub struct App {
     /// Cached sorted tags for the UI — rebuilt every 2 ticks.
     pub signal_tags: Vec<SignalTag>,
 
+    // Protocol tracking (psnet-style — tick-based fading)
+    pub proto_tracker: ProtocolTracker,
+
     // Wire tracking (Wireshark-like event log)
     pub wire_tracker: WireTracker,
     /// Currently selected event index in the Wire view.
@@ -282,6 +282,7 @@ impl App {
             signal_tracker: SignalTracker::new(),
             signal_tags: Vec::new(),
 
+            proto_tracker: ProtocolTracker::new(),
             wire_tracker: WireTracker::new(),
             wire_selected: 0,
             wire_auto_scroll: true,
@@ -548,6 +549,12 @@ impl App {
                 &self.geoip_cache,
                 &self.dns_cache,
             );
+        }
+
+        // ── Protocol tracking (every tick — psnet-style) ─────────
+        {
+            let low_level = data::procfs::scan_low_level_protocols();
+            self.proto_tracker.process(&self.connections, &low_level, self.tick_count);
         }
 
         // ── Signal tracking (every 2 ticks) ─────────────────────────
