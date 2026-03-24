@@ -136,42 +136,43 @@ fn draw_kpi_strip(f: &mut Frame, app: &App, area: Rect) {
         theme::DANGER,
     );
 
-    // DOORS — exposed / total ports
+    // INBOUND — connections coming INTO the server
+    let inbound = app.connections.iter()
+        .filter(|c| c.direction == crate::data::Direction::Inbound
+                && c.state != crate::data::TcpState::Listen)
+        .count();
+    kpi_badge::draw_kpi_badge(
+        f,
+        cols[1],
+        "INBOUND",
+        &format_count(inbound as u64),
+        "connections",
+        theme::CYAN,
+    );
+
+    // OUTBOUND — connections going OUT from the server
+    let outbound = app.connections.iter()
+        .filter(|c| c.direction == crate::data::Direction::Outbound)
+        .count();
+    kpi_badge::draw_kpi_badge(
+        f,
+        cols[2],
+        "OUTBOUND",
+        &format_count(outbound as u64),
+        "connections",
+        theme::GREEN,
+    );
+
+    // DOORS — listening ports with exposure status
     let total_ports = app.ports.len();
     let exposed = app.ports.iter().filter(|p| p.risk != PortRisk::Safe).count();
     kpi_badge::draw_kpi_badge(
         f,
-        cols[1],
+        cols[3],
         "DOORS",
         &format!("{}/{}", exposed, total_ports),
         "exposed",
         if exposed > 0 { theme::WARN } else { theme::SAFE },
-    );
-
-    // CONNS
-    kpi_badge::draw_kpi_badge(
-        f,
-        cols[2],
-        "CONNS",
-        &format_count(app.connections.len() as u64),
-        "active",
-        theme::ACCENT,
-    );
-
-    // BLOCKED — firewall deny hits
-    let deny_hits: u64 = app
-        .firewall_rules
-        .iter()
-        .filter(|r| r.action == crate::data::FirewallAction::Deny)
-        .map(|r| r.hits)
-        .sum();
-    kpi_badge::draw_kpi_badge(
-        f,
-        cols[3],
-        "BLOCKED",
-        &format_count(deny_hits),
-        "denied",
-        theme::GOLD,
     );
 
     // BANNED
@@ -269,10 +270,15 @@ fn draw_doors_strip(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let safe_count = app.ports.iter().filter(|p| p.risk == PortRisk::Safe).count();
-    let shielded_count = app.ports.iter().filter(|p| p.risk == PortRisk::Shielded).count();
-    let exposed_count = app.ports.iter().filter(|p| p.risk == PortRisk::Exposed).count();
-    let critical_count = app.ports.iter().filter(|p| p.risk == PortRisk::Critical).count();
+    // Count inbound connections per port
+    let mut conns_per_port: std::collections::HashMap<u16, usize> = std::collections::HashMap::new();
+    for conn in &app.connections {
+        if conn.direction == crate::data::Direction::Inbound
+            && conn.state != crate::data::TcpState::Listen
+        {
+            *conns_per_port.entry(conn.local_addr.port()).or_default() += 1;
+        }
+    }
 
     let mut spans: Vec<Span> = Vec::new();
     spans.push(Span::styled(
@@ -280,16 +286,29 @@ fn draw_doors_strip(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(theme::TITLE).add_modifier(Modifier::BOLD),
     ));
 
-    // Render each port as a colored dot
+    // Render each port with its risk color and inbound connection count
     for port in &app.ports {
         let dot_color = theme::risk_color(port.risk);
-        spans.push(Span::styled(
-            format!("\u{25CF}{} ", port.port),
-            Style::default().fg(dot_color),
-        ));
+        let conn_count = conns_per_port.get(&port.port).copied().unwrap_or(0);
+        if conn_count > 0 {
+            spans.push(Span::styled(
+                format!("\u{25CF}{}({})", port.port, conn_count),
+                Style::default().fg(dot_color),
+            ));
+        } else {
+            spans.push(Span::styled(
+                format!("\u{25CF}{}", port.port),
+                Style::default().fg(dot_color),
+            ));
+        }
+        spans.push(Span::styled(" ", Style::default()));
     }
 
-        // Summary counts
+    // Summary counts
+    let safe_count = app.ports.iter().filter(|p| p.risk == PortRisk::Safe).count();
+    let exposed_count = app.ports.iter().filter(|p| p.risk == PortRisk::Exposed).count();
+    let critical_count = app.ports.iter().filter(|p| p.risk == PortRisk::Critical).count();
+
     spans.push(Span::styled(
         " \u{2500}\u{2500} ",
         Style::default().fg(theme::SEPARATOR),
@@ -298,21 +317,18 @@ fn draw_doors_strip(f: &mut Frame, app: &App, area: Rect) {
         format!("{} safe", safe_count),
         Style::default().fg(theme::SAFE),
     ));
-    spans.push(Span::styled(" ", Style::default()));
-    spans.push(Span::styled(
-        format!("{} shielded", shielded_count),
-        Style::default().fg(theme::SHIELDED),
-    ));
-    spans.push(Span::styled(" ", Style::default()));
+    spans.push(Span::styled("  ", Style::default()));
     spans.push(Span::styled(
         format!("{} exposed", exposed_count),
         Style::default().fg(theme::WARN),
     ));
-    spans.push(Span::styled(" ", Style::default()));
-    spans.push(Span::styled(
-        format!("{} critical", critical_count),
-        Style::default().fg(theme::DANGER),
-    ));
+    if critical_count > 0 {
+        spans.push(Span::styled("  ", Style::default()));
+        spans.push(Span::styled(
+            format!("{} critical", critical_count),
+            Style::default().fg(theme::DANGER).add_modifier(Modifier::BOLD),
+        ));
+    }
 
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line).style(Style::default().bg(theme::BG));

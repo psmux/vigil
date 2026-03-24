@@ -18,8 +18,18 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let now = chrono::Utc::now();
     let time_str = now.format("%H:%M:%S UTC").to_string();
 
-    let conn_count = app.connections.len();
     let threat_count = app.attackers_sorted.len();
+
+    // Count connections by direction — this is what business users care about
+    let inbound = app.connections.iter()
+        .filter(|c| c.direction == crate::data::Direction::Inbound && c.state != crate::data::TcpState::Listen)
+        .count();
+    let outbound = app.connections.iter()
+        .filter(|c| c.direction == crate::data::Direction::Outbound)
+        .count();
+    let listening = app.connections.iter()
+        .filter(|c| c.state == crate::data::TcpState::Listen)
+        .count();
 
     let sep = Span::styled(
         " \u{2500}\u{2500} ", // ──
@@ -51,9 +61,20 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(theme::UPLOAD),
         ),
         sep.clone(),
+        // Direction breakdown — clear at a glance
         Span::styled(
-            format!("{} conns", conn_count),
-            Style::default().fg(theme::TEXT),
+            format!("\u{2190}{} in", inbound),
+            Style::default().fg(theme::CYAN),
+        ),
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            format!("\u{2192}{} out", outbound),
+            Style::default().fg(theme::GREEN),
+        ),
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            format!("\u{25C9}{} listen", listening),
+            Style::default().fg(theme::BLUE),
         ),
         sep.clone(),
         Span::styled(

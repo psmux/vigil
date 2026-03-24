@@ -141,8 +141,15 @@ fn draw_attacker_table(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    // Pre-compute target ports per attacker IP (O(attacks) once, not per-row)
+    let mut attacker_ports: HashMap<std::net::IpAddr, Vec<u16>> = HashMap::new();
+    for attack in &app.attacks {
+        if let Some(port) = attack.target_port {
+            attacker_ports.entry(attack.source_ip).or_default().push(port);
+        }
+    }
+
     // Use the pre-sorted, pre-aggregated attacker list from app state.
-    // No re-aggregation or re-sorting per frame — stable ordering guaranteed.
     let sorted = &app.attackers_sorted;
 
     let max_count = sorted.first().map(|s| s.total_attempts).unwrap_or(1).max(1);
@@ -155,6 +162,10 @@ fn draw_attacker_table(f: &mut Frame, app: &App, area: Rect) {
         ),
         Span::styled(
             format!("{:<6}", "CC"),
+            Style::default().fg(theme::TEXT_DIM).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{:<10}", "Target"),
             Style::default().fg(theme::TEXT_DIM).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -193,16 +204,38 @@ fn draw_attacker_table(f: &mut Frame, app: &App, area: Rect) {
             .unwrap_or_else(|| "--".into());
         let cc_str = format!("{:<6}", cc);
 
+        // Target ports — show the most attacked port(s) for this IP
+        let target_str = match attacker_ports.get(&agg.source_ip) {
+            Some(ports) if !ports.is_empty() => {
+                // Find the most common port
+                let mut port_counts: HashMap<u16, usize> = HashMap::new();
+                for &p in ports {
+                    *port_counts.entry(p).or_default() += 1;
+                }
+                let mut sorted_ports: Vec<(u16, usize)> = port_counts.into_iter().collect();
+                sorted_ports.sort_by(|a, b| b.1.cmp(&a.1));
+                if sorted_ports.len() == 1 {
+                    format!(":{:<9}", sorted_ports[0].0)
+                } else {
+                    format!(":{},+{:<4}",
+                        sorted_ports[0].0,
+                        sorted_ports.len() - 1,
+                    )
+                }
+            }
+            _ => format!("{:<10}", "--"),
+        };
+
         let count_str = format!("{:>8}", format_count(agg.total_attempts));
 
-        // Intensity bar using block characters
+        // Intensity bar
         let intensity = (agg.total_attempts as f64 / max_count as f64).clamp(0.0, 1.0);
         let bar_width: usize = 10;
         let filled = (intensity * bar_width as f64).round() as usize;
         let bar: String = "\u{2588}".repeat(filled)
             + &"\u{2591}".repeat(bar_width.saturating_sub(filled));
 
-        // Status: BANNED or ACTIVE (read from pre-computed field)
+        // Status: BANNED or ACTIVE
         let (status_str, status_color) = if agg.banned {
             ("BANNED  ", theme::SAFE)
         } else {
@@ -215,6 +248,7 @@ fn draw_attacker_table(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(vec![
             Span::styled(ip_str, Style::default().fg(theme::TEXT)),
             Span::styled(cc_str, Style::default().fg(theme::CYAN)),
+            Span::styled(target_str, Style::default().fg(theme::GOLD)),
             Span::styled(count_str, Style::default().fg(theme::GOLD)),
             Span::styled("  ", Style::default()),
             Span::styled(

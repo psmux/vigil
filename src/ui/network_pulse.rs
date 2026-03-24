@@ -34,29 +34,89 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let main_rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(25),
-            Constraint::Length(8),
-            Constraint::Min(10),
+            Constraint::Length(3),        // direction summary
+            Constraint::Percentage(20),   // sparklines + state chart
+            Constraint::Length(8),        // protocol cloud
+            Constraint::Min(10),          // connection table
         ])
         .split(area);
 
-    // ── Top section: sparklines + state bar chart ─────────────────
+    // ── Direction summary bar — the key numbers at a glance ──────
+    draw_direction_summary(f, app, main_rows[0]);
+
+    // ── Sparklines + state bar chart ─────────────────────────────
     let top_rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Percentage(50),
             Constraint::Percentage(50),
         ])
-        .split(main_rows[0]);
+        .split(main_rows[1]);
 
     draw_bandwidth_sparklines(f, app, top_rows[0]);
     draw_state_bar_chart(f, app, top_rows[1]);
 
-    // ── Middle section: protocol signal cloud (psnet-style) ─────
-    draw_protocol_cloud(f, app, main_rows[1]);
+    // ── Protocol signal cloud (psnet-style) ──────────────────────
+    draw_protocol_cloud(f, app, main_rows[2]);
 
-    // ── Bottom section: connection table ──────────────────────────
-    draw_connection_table(f, app, main_rows[2]);
+    // ── Connection table ─────────────────────────────────────────
+    draw_connection_table(f, app, main_rows[3]);
+}
+
+// ─── Direction Summary ───────────────────────────────────────────
+
+fn draw_direction_summary(f: &mut Frame, app: &App, area: Rect) {
+    use crate::data::{Direction as D, TcpState};
+
+    let inbound = app.connections.iter()
+        .filter(|c| c.direction == D::Inbound && c.state != TcpState::Listen)
+        .count();
+    let outbound = app.connections.iter()
+        .filter(|c| c.direction == D::Outbound)
+        .count();
+    let local = app.connections.iter()
+        .filter(|c| c.direction == D::Local && c.state != TcpState::Listen)
+        .count();
+    let listening = app.connections.iter()
+        .filter(|c| c.state == TcpState::Listen)
+        .count();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
+        .title(Span::styled(
+            " Traffic Summary ",
+            Style::default().fg(theme::TITLE).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(theme::BG));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let line = Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            format!("\u{2190} {} Inbound", inbound),
+            Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("     ", Style::default()),
+        Span::styled(
+            format!("\u{2192} {} Outbound", outbound),
+            Style::default().fg(theme::GREEN).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("     ", Style::default()),
+        Span::styled(
+            format!("\u{2194} {} Local", local),
+            Style::default().fg(theme::TEXT_DIM),
+        ),
+        Span::styled("     ", Style::default()),
+        Span::styled(
+            format!("\u{25C9} {} Listening", listening),
+            Style::default().fg(theme::BLUE).add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    let paragraph = Paragraph::new(line).style(Style::default().bg(theme::BG));
+    f.render_widget(paragraph, inner);
 }
 
 // ─── Bandwidth Sparklines ─────────────────────────────────────────
@@ -303,10 +363,17 @@ fn build_connection_line<'a>(conn: &Connection, app: &App, width: usize) -> Line
     let state_display = format!("{:<12}", state_label);
     let state_color = theme::state_color(conn.state);
 
-    // ── Rx / Tx (Connection struct has no per-conn bandwidth,
-    //    show em-dash placeholder) ────────────────────────────────
-    let rx_display = format!("{:>9}", "\u{2014}");
-    let tx_display = format!("{:>9}", "\u{2014}");
+    // ── Rx / Tx — real per-connection bandwidth from AF_PACKET capture
+    let rx_display = if conn.rx_bps > 0.0 {
+        format!("{:>9}", format_bps(conn.rx_bps))
+    } else {
+        format!("{:>9}", "\u{2014}")
+    };
+    let tx_display = if conn.tx_bps > 0.0 {
+        format!("{:>9}", format_bps(conn.tx_bps))
+    } else {
+        format!("{:>9}", "\u{2014}")
+    };
 
     // ── Assemble spans ───────────────────────────────────────────
     let spans: Vec<Span<'a>> = vec![
