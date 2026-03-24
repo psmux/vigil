@@ -193,6 +193,12 @@ pub struct App {
     // Protocol tracking (psnet-style — tick-based fading)
     pub proto_tracker: ProtocolTracker,
 
+    // Capture mode
+    /// Whether AF_PACKET capture is active (real per-flow bandwidth).
+    pub capture_active: bool,
+    /// Capture engine stats for diagnostics.
+    pub capture_stats: data::capture::PacketStats,
+
     // Wire tracking (Wireshark-like event log)
     pub wire_tracker: WireTracker,
     /// Currently selected event index in the Wire view.
@@ -281,6 +287,9 @@ impl App {
 
             signal_tracker: SignalTracker::new(),
             signal_tags: Vec::new(),
+
+            capture_active: false,
+            capture_stats: data::capture::PacketStats::default(),
 
             proto_tracker: ProtocolTracker::new(),
             wire_tracker: WireTracker::new(),
@@ -375,6 +384,10 @@ impl App {
                     self.neighbors = neighbors;
                     self.services = services;
                     self.interfaces = interfaces;
+                }
+                DataUpdate::PacketStats(stats) => {
+                    self.capture_active = stats.capture_active;
+                    self.capture_stats = stats;
                 }
             }
         }
@@ -487,7 +500,10 @@ impl App {
         }
 
         // ── Per-connection bandwidth estimation ─────────────────────
-        {
+        // When AF_PACKET capture is active, connections already have real
+        // per-flow bandwidth from the capture engine. Only use the crude
+        // uniform-split estimate as a fallback in /proc-only mode.
+        if !self.capture_active {
             let established_indices: Vec<usize> = self.connections.iter().enumerate()
                 .filter(|(_, c)| c.state == TcpState::Established)
                 .map(|(i, _)| i)

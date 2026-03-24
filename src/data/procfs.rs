@@ -481,8 +481,7 @@ mod tests {
     fn test_empty_on_missing_proc() {
         // On Windows (or any non-Linux), these should return empty
         if !Path::new("/proc/net/tcp").exists() {
-            assert!(parse_proc_net_tcp(false).is_empty());
-            assert!(parse_proc_net_udp(false).is_empty());
+            assert!(parse_all_proc_net_sockets().is_empty());
             assert!(parse_proc_net_dev().is_empty());
             assert!(build_inode_pid_map().is_empty());
         }

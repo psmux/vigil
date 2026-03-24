@@ -118,14 +118,29 @@ fn restore_terminal() -> anyhow::Result<()> {
 }
 
 /// Spawn real background data-collection threads.
-fn spawn_data_threads(tx: mpsc::Sender<DataUpdate>, _config: &VigilConfig) {
-    // 1. Connection collector — every 2s parses /proc/net/tcp* and /proc/net/udp*
+fn spawn_data_threads(tx: mpsc::Sender<DataUpdate>, config: &VigilConfig) {
+    // 1. Packet capture / connection collector
+    //    On Linux with root: AF_PACKET for real per-connection bandwidth + true direction.
+    //    Otherwise: /proc/net polling (existing behavior).
     {
         let tx = tx.clone();
-        std::thread::spawn(move || loop {
-            let conns = data::connections::collect_connections();
-            let _ = tx.send(DataUpdate::Connections(conns));
-            std::thread::sleep(Duration::from_secs(2));
+        let iface = config.capture_interface.clone();
+        let mode = config.capture_mode;
+        std::thread::spawn(move || {
+            match mode {
+                config::CaptureMode::ProcOnly => {
+                    // Forced /proc-only mode
+                    loop {
+                        let conns = data::connections::collect_connections();
+                        let _ = tx.send(DataUpdate::Connections(conns));
+                        std::thread::sleep(Duration::from_secs(2));
+                    }
+                }
+                _ => {
+                    // Auto or PacketCapture — try AF_PACKET with fallback
+                    data::capture::run_capture_thread(tx, iface.as_deref());
+                }
+            }
         });
     }
 

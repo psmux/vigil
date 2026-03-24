@@ -69,6 +69,10 @@ pub fn collect_connections() -> Vec<Connection> {
             tx_queue: raw.tx_queue,
             rx_queue: raw.rx_queue,
             retransmits: raw.retransmits,
+            rx_bytes_total: 0,
+            tx_bytes_total: 0,
+            packet_count: 0,
+            capture_source: CaptureSource::ProcFs,
         });
     }
 

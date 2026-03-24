@@ -1,6 +1,7 @@
 pub mod procfs;
 pub mod bandwidth;
 pub mod connections;
+pub mod capture;
 pub mod ports;
 pub mod processes;
 pub mod attacks;
@@ -38,6 +39,16 @@ pub enum DataUpdate {
         services: Vec<ServiceStatus>,
         interfaces: Vec<NetworkInterface>,
     },
+    PacketStats(capture::PacketStats),
+}
+
+// ─── Capture source ───────────────────────────────────────────────
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureSource {
+    /// Real packet capture via AF_PACKET — accurate bandwidth and direction.
+    PacketCapture,
+    /// /proc/net polling only — estimated bandwidth, heuristic direction.
+    ProcFs,
 }
 
 // ─── Connection ────────────────────────────────────────────────────
@@ -62,6 +73,14 @@ pub struct Connection {
     pub rx_queue: u32,
     /// TCP retransmit count.
     pub retransmits: u32,
+    /// Total bytes received on this connection (from packet capture).
+    pub rx_bytes_total: u64,
+    /// Total bytes transmitted on this connection (from packet capture).
+    pub tx_bytes_total: u64,
+    /// Packets captured for this flow.
+    pub packet_count: u32,
+    /// Whether this connection was seen via packet capture or /proc only.
+    pub capture_source: CaptureSource,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
