@@ -28,12 +28,16 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7),       // heatmap
-            Constraint::Percentage(40),  // middle row
-            Constraint::Min(5),          // attacker table
-            Constraint::Length(8),       // recent alerts
+            Constraint::Length(3),        // breach status banner
+            Constraint::Length(7),        // heatmap
+            Constraint::Percentage(35),   // middle row
+            Constraint::Min(5),           // attacker table
+            Constraint::Length(8),        // recent alerts
         ])
         .split(area);
+
+    // ── Breach status banner — the #1 question answered first ────
+    draw_breach_status(f, app, chunks[0]);
 
     // ── Heatmap ──────────────────────────────────────────────────
     let current_hour = chrono::Utc::now().format("%H").to_string()
@@ -41,7 +45,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         .unwrap_or(0);
     heatmap::draw_heatmap(
         f,
-        chunks[0],
+        chunks[1],
         "Attack Heatmap (24h)",
         &app.attacks_24h,
         current_hour,
@@ -54,16 +58,111 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Percentage(40),
             Constraint::Percentage(60),
         ])
-        .split(chunks[1]);
+        .split(chunks[2]);
 
     draw_attack_type_bars(f, app, mid_cols[0]);
     draw_origins_map(f, app, mid_cols[1]);
 
     // ── Attacker table ───────────────────────────────────────────
-    draw_attacker_table(f, app, chunks[2]);
+    draw_attacker_table(f, app, chunks[3]);
 
     // ── Recent alerts ────────────────────────────────────────────
-    draw_recent_alerts(f, app, chunks[3]);
+    draw_recent_alerts(f, app, chunks[4]);
+}
+
+// ─── Breach Status Banner ────────────────────────────────────────
+//
+// The single most important question: "Has anyone actually gotten in?"
+// Cross-references attacker IPs with active established connections.
+
+fn draw_breach_status(f: &mut Frame, app: &App, area: Rect) {
+    use std::collections::HashSet;
+    use crate::data::TcpState;
+
+    // Check: does any known attacker IP have an ESTABLISHED connection?
+    let attacker_ips: HashSet<std::net::IpAddr> = app.attackers_sorted.iter()
+        .map(|a| a.source_ip)
+        .collect();
+
+    let breach_connections: Vec<&crate::data::Connection> = app.connections.iter()
+        .filter(|c| c.state == TcpState::Established
+            && attacker_ips.contains(&c.remote_addr.ip()))
+        .collect();
+
+    let total_attacks = app.attack_count_total;
+    let active_attackers = app.attackers_sorted.iter()
+        .filter(|a| !a.banned)
+        .count();
+    let banned_count = app.banned_ips.len();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER).bg(theme::BG))
+        .style(Style::default().bg(theme::BG));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let line = if !breach_connections.is_empty() {
+        // BREACH DETECTED — attacker IP has an active connection
+        let breach_ip = breach_connections[0].remote_addr.ip();
+        let port = breach_connections[0].local_addr.port();
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                " BREACH DETECTED ",
+                Style::default().fg(theme::BG).bg(theme::DANGER)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  Attacker {} has an active connection on port {} — investigate immediately",
+                    breach_ip, port),
+                Style::default().fg(theme::DANGER).add_modifier(Modifier::BOLD),
+            ),
+        ])
+    } else if total_attacks == 0 {
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                " ALL CLEAR ",
+                Style::default().fg(theme::BG).bg(theme::SAFE)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  No attacks detected",
+                Style::default().fg(theme::SAFE),
+            ),
+        ])
+    } else {
+        // All attacks failed — reassure the user
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                " ALL BLOCKED ",
+                Style::default().fg(theme::BG).bg(theme::SAFE)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {} failed attempts from {} attackers", total_attacks, attacker_ips.len()),
+                Style::default().fg(theme::TEXT),
+            ),
+            Span::styled("  \u{2502}  ", Style::default().fg(theme::SEPARATOR)),
+            Span::styled(
+                format!("{} banned", banned_count),
+                Style::default().fg(theme::SAFE),
+            ),
+            if active_attackers > 0 {
+                Span::styled(
+                    format!("  {} pending ban", active_attackers),
+                    Style::default().fg(theme::GOLD),
+                )
+            } else {
+                Span::styled("", Style::default())
+            },
+        ])
+    };
+
+    let paragraph = Paragraph::new(line).style(Style::default().bg(theme::BG));
+    f.render_widget(paragraph, inner);
 }
 
 fn draw_attack_type_bars(f: &mut Frame, app: &App, area: Rect) {
@@ -235,11 +334,19 @@ fn draw_attacker_table(f: &mut Frame, app: &App, area: Rect) {
         let bar: String = "\u{2588}".repeat(filled)
             + &"\u{2591}".repeat(bar_width.saturating_sub(filled));
 
-        // Status: BANNED or ACTIVE
-        let (status_str, status_color) = if agg.banned {
-            ("BANNED  ", theme::SAFE)
+        // Status: BANNED, ACTIVE with attempt count, or BREACH
+        let has_conn = app.connections.iter().any(|c|
+            c.state == crate::data::TcpState::Established
+            && c.remote_addr.ip() == agg.source_ip
+        );
+        let (status_str, status_color) = if has_conn {
+            ("BREACH! ".to_string(), theme::DANGER)
+        } else if agg.banned {
+            ("BANNED  ".to_string(), theme::SAFE)
         } else {
-            ("ACTIVE  ", theme::DANGER)
+            // Show attempt count — helps user understand ban progress
+            let n = agg.total_attempts;
+            (format!("{} tries", n), theme::GOLD)
         };
 
         // Time ago
@@ -255,7 +362,7 @@ fn draw_attacker_table(f: &mut Frame, app: &App, area: Rect) {
                 format!("{:<12}", bar),
                 Style::default().fg(theme::RED),
             ),
-            Span::styled(status_str.to_string(), Style::default().fg(status_color)),
+            Span::styled(format!("{:<8}", status_str), Style::default().fg(status_color)),
             Span::styled(time_str, Style::default().fg(theme::TEXT_DIM)),
         ]));
     }

@@ -126,14 +126,18 @@ fn draw_kpi_strip(f: &mut Frame, app: &App, area: Rect) {
         ])
         .split(area);
 
-    // ATTACKS
+    // ATTACKS — clarify these are all FAILED attempts
+    let has_breach = app.connections.iter().any(|c| {
+        c.state == crate::data::TcpState::Established
+            && app.attackers_sorted.iter().any(|a| a.source_ip == c.remote_addr.ip())
+    });
     kpi_badge::draw_kpi_badge(
         f,
         cols[0],
-        "ATTACKS",
+        if has_breach { "BREACH!" } else { "BLOCKED" },
         &format_count(app.attack_count_total),
-        "total",
-        theme::DANGER,
+        if has_breach { "INVESTIGATE" } else { "all failed" },
+        if has_breach { theme::DANGER } else { theme::GOLD },
     );
 
     // INBOUND — connections coming INTO the server
