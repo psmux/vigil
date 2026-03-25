@@ -134,6 +134,10 @@ pub struct App {
     /// Dirty flag: set when attacker_map changes, cleared after re-sort.
     attackers_dirty: bool,
 
+    /// IPs that have successfully logged in (from "Accepted" auth.log lines).
+    /// Used for breach detection: breach = attacker IP that also successfully logged in.
+    pub successful_login_ips: HashSet<IpAddr>,
+
     // Bandwidth
     pub bandwidth_rx: RingBuffer<f64>,
     pub bandwidth_tx: RingBuffer<f64>,
@@ -245,6 +249,7 @@ impl App {
             attacker_map: HashMap::new(),
             attackers_sorted: Vec::new(),
             attackers_dirty: false,
+            successful_login_ips: HashSet::new(),
 
             bandwidth_rx: RingBuffer::new(300),
             bandwidth_tx: RingBuffer::new(300),
@@ -388,6 +393,9 @@ impl App {
                 DataUpdate::PacketStats(stats) => {
                     self.capture_active = stats.capture_active;
                     self.capture_stats = stats;
+                }
+                DataUpdate::SuccessfulLogin(ip) => {
+                    self.successful_login_ips.insert(ip);
                 }
             }
         }

@@ -77,16 +77,17 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_breach_status(f: &mut Frame, app: &App, area: Rect) {
     use std::collections::HashSet;
-    use crate::data::TcpState;
 
-    // Check: does any known attacker IP have an ESTABLISHED connection?
+    // Breach detection: an attacker IP that ALSO successfully logged in.
+    // We do NOT use TCP connection state because connections exist briefly
+    // during failed auth handshakes — that would cause false positives.
     let attacker_ips: HashSet<std::net::IpAddr> = app.attackers_sorted.iter()
         .map(|a| a.source_ip)
         .collect();
 
-    let breach_connections: Vec<&crate::data::Connection> = app.connections.iter()
-        .filter(|c| c.state == TcpState::Established
-            && attacker_ips.contains(&c.remote_addr.ip()))
+    let breached_ips: Vec<std::net::IpAddr> = app.successful_login_ips.iter()
+        .filter(|ip| attacker_ips.contains(ip))
+        .copied()
         .collect();
 
     let total_attacks = app.attack_count_total;
@@ -102,10 +103,9 @@ fn draw_breach_status(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let line = if !breach_connections.is_empty() {
-        // BREACH DETECTED — attacker IP has an active connection
-        let breach_ip = breach_connections[0].remote_addr.ip();
-        let port = breach_connections[0].local_addr.port();
+    let line = if !breached_ips.is_empty() {
+        // BREACH: attacker IP successfully authenticated
+        let breach_ip = breached_ips[0];
         Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(
@@ -114,8 +114,7 @@ fn draw_breach_status(f: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("  Attacker {} has an active connection on port {} — investigate immediately",
-                    breach_ip, port),
+                format!("  Attacker {} successfully logged in — investigate immediately", breach_ip),
                 Style::default().fg(theme::DANGER).add_modifier(Modifier::BOLD),
             ),
         ])
@@ -334,12 +333,9 @@ fn draw_attacker_table(f: &mut Frame, app: &App, area: Rect) {
         let bar: String = "\u{2588}".repeat(filled)
             + &"\u{2591}".repeat(bar_width.saturating_sub(filled));
 
-        // Status: BANNED, ACTIVE with attempt count, or BREACH
-        let has_conn = app.connections.iter().any(|c|
-            c.state == crate::data::TcpState::Established
-            && c.remote_addr.ip() == agg.source_ip
-        );
-        let (status_str, status_color) = if has_conn {
+        // Status: BREACH (successful login), BANNED, or attempt count
+        let breached = app.successful_login_ips.contains(&agg.source_ip);
+        let (status_str, status_color) = if breached {
             ("BREACH! ".to_string(), theme::DANGER)
         } else if agg.banned {
             ("BANNED  ".to_string(), theme::SAFE)

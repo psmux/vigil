@@ -127,10 +127,9 @@ fn draw_kpi_strip(f: &mut Frame, app: &App, area: Rect) {
         .split(area);
 
     // ATTACKS — clarify these are all FAILED attempts
-    let has_breach = app.connections.iter().any(|c| {
-        c.state == crate::data::TcpState::Established
-            && app.attackers_sorted.iter().any(|a| a.source_ip == c.remote_addr.ip())
-    });
+    // Breach = attacker IP that also has a SUCCESSFUL login (not just TCP connection)
+    let has_breach = app.attackers_sorted.iter()
+        .any(|a| app.successful_login_ips.contains(&a.source_ip));
     kpi_badge::draw_kpi_badge(
         f,
         cols[0],

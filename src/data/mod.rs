@@ -40,6 +40,8 @@ pub enum DataUpdate {
         interfaces: Vec<NetworkInterface>,
     },
     PacketStats(capture::PacketStats),
+    /// A successful login was detected from this IP (parsed from "Accepted" in auth.log).
+    SuccessfulLogin(IpAddr),
 }
 
 // ─── Capture source ───────────────────────────────────────────────

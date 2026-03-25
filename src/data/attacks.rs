@@ -54,6 +54,12 @@ fn tail_auth_log(tx: &mpsc::Sender<DataUpdate>) -> Result<(), ()> {
                 break;
             }
         }
+        // Also track successful logins for breach detection accuracy
+        if let Some(ip) = parse_successful_login(&line) {
+            if tx.send(DataUpdate::SuccessfulLogin(ip)).is_err() {
+                break;
+            }
+        }
     }
 
     Err(()) // stream ended
@@ -78,6 +84,11 @@ fn tail_journalctl(tx: &mpsc::Sender<DataUpdate>) -> Result<(), ()> {
     for line in reader.lines().flatten() {
         if let Some(event) = parse_auth_line(&line) {
             if tx.send(DataUpdate::Attack(event)).is_err() {
+                break;
+            }
+        }
+        if let Some(ip) = parse_successful_login(&line) {
+            if tx.send(DataUpdate::SuccessfulLogin(ip)).is_err() {
                 break;
             }
         }
@@ -189,6 +200,23 @@ fn parse_auth_line(line: &str) -> Option<AttackEvent> {
         username,
         count: 1,
     })
+}
+
+/// Parse a successful login line ("Accepted publickey/password for ... from IP").
+///
+/// Used for breach detection: a breach = an IP that attacked us AND successfully
+/// logged in. Without this, we'd false-positive on transient TCP connections
+/// during failed auth handshakes.
+fn parse_successful_login(line: &str) -> Option<IpAddr> {
+    if !line.contains("Accepted") {
+        return None;
+    }
+    // "Accepted publickey for root from 124.123.68.37 port 53978 ssh2: ..."
+    // "Accepted password for admin from 1.2.3.4 port 12345 ssh2"
+    let from_idx = line.find(" from ")?;
+    let after_from = &line[from_idx + 6..];
+    let ip_str = after_from.split_whitespace().next()?;
+    ip_str.parse::<IpAddr>().ok()
 }
 
 /// Create a no-op placeholder event (used only for keepalive on non-Linux).
